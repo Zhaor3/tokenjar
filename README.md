@@ -1,6 +1,25 @@
 # TOKENJAR
 
-API usage tracker desktop gadget for Anthropic (Claude) and OpenAI APIs. ESP32-S3 + 2" IPS LCD + rotary encoder.
+A minimal desk gadget that shows real-time API spending and token usage for **Anthropic Claude** and **OpenAI** — built on an ESP32-S3 SuperMini with a 2" IPS LCD.
+
+![TOKENJAR showing Claude spend with orange accent](docs/preview.jpg)
+
+## What it tracks
+
+TokenJar connects to the **Admin API** of each platform and displays:
+
+| Metric | Claude | OpenAI |
+|--------|--------|--------|
+| Today's spend ($) | ✅ | ✅ |
+| Month-to-date spend ($) | ✅ | ✅ |
+| Token count (today / month) | ✅ | ✅ |
+| 24-hour sparkline | ✅ | ✅ |
+| Budget % bar | ✅ | ✅ |
+
+> **Note:** The Admin API tracks **API platform usage** — calls made via SDK, Cursor, code, etc. using `sk-ant-api...` keys.  
+> It does **not** track Claude.ai Pro web conversations, session limits, or weekly limits — those are internal to Claude.ai and have no public API.
+
+---
 
 ## Hardware
 
@@ -34,13 +53,15 @@ SW   ──────────────────  GPIO 3   (active lo
 GND  ──────────────────  GND
 ```
 
+---
+
 ## Building & Flashing
 
 Requires [PlatformIO](https://platformio.org/).
 
 ```bash
 # Clone
-git clone <repo-url> tokenjar && cd tokenjar
+git clone https://github.com/Zhaor3/tokenjar && cd tokenjar
 
 # Build
 pio run
@@ -48,50 +69,81 @@ pio run
 # Flash
 pio run -t upload
 
-# Monitor serial
+# Serial monitor
 pio device monitor
 ```
 
+---
+
 ## First-Boot Setup
 
-1. Power the board via USB-C. The splash screen appears, then a **QR code**.
-2. On your phone or laptop, connect to the WiFi network **tokenjar-setup**.
-3. Open **http://192.168.4.1** (or scan the QR code).
-4. Select your WiFi network from the scanned list, enter the password.
+1. Power the board. The splash screen appears, then a **QR code**.
+2. On your phone or laptop, connect to WiFi network **`tokenjar-setup`**.
+3. Open **http://192.168.4.1** in your browser.
+4. Type your WiFi network name (or click a scanned network) and enter the password.
 5. Paste your **Anthropic Admin API key** and/or **OpenAI Admin API key**.
 6. Set daily and monthly budgets for each provider.
-7. Click **Test Connections** to verify both keys work.
-8. Click **Save & Reboot**. The device reboots, connects to WiFi, and starts fetching data.
+7. Click **Test Connections** to verify the keys work.
+8. Click **Save & Reboot**. The device connects to WiFi and starts fetching data.
+
+> **To re-enter setup at any time:** Long-press the encoder button for 1 second while the main UI is running. This clears all settings and reboots into the setup portal.
 
 ### Getting Admin API Keys
 
-- **Anthropic**: [console.anthropic.com/settings/admin-keys](https://console.anthropic.com/settings/admin-keys) — create an Admin key (starts with `sk-ant-admin`).
-- **OpenAI**: [platform.openai.com/settings/organization/admin-keys](https://platform.openai.com/settings/organization/admin-keys) — create an Admin key.
+- **Anthropic**: [console.anthropic.com/settings/admin-keys](https://console.anthropic.com/settings/admin-keys)  
+  Create an **Admin key** — starts with `sk-ant-admin01-...`  
+  Requires organization admin access.
 
-Both require organization admin access.
+- **OpenAI**: [platform.openai.com/settings/organization/admin-keys](https://platform.openai.com/settings/organization/admin-keys)  
+  Create an **Admin key** — starts with `sk-admin-...`  
+  Requires organization admin access.
 
-## Usage
+---
+
+## Using the Device
 
 | Action | Effect |
 |--------|--------|
-| **Short press** encoder button | Cycle through modes: Claude Today → Claude Month → OpenAI Today → OpenAI Month → Combined → Settings |
+| **Short press** encoder | Cycle through screens |
 | **Rotate** encoder | Change timeframe: 1h / 6h / 24h / 7d / 30d |
-| **Long press** (>1 s) | Force immediate API refresh |
+| **Long press** (>1 s) during run | Wipe settings, reboot to setup portal |
+| **Long press** during splash | Same — force setup portal |
 
-Modes for unconfigured providers are hidden automatically.
+### Screens
 
-## Modes
-
-1. **Claude Today** — today's spend, budget %, token count, 24h sparkline
-2. **Claude Month** — month-to-date spend, projected total
+1. **Claude Today** — today's spend, budget %, token count, sparkline
+2. **Claude Month** — month-to-date spend and tokens
 3. **OpenAI Today** — same layout
 4. **OpenAI Month** — same layout
 5. **Combined** — totals across both providers
-6. **Settings** — WiFi status, IP address, free heap, uptime
+6. **Settings** — WiFi status, IP, free heap, uptime
+
+Screens for unconfigured providers are automatically hidden.
+
+---
+
+## Configuration
+
+Edit `src/config.h` to adjust:
+
+```cpp
+constexpr uint32_t API_REFRESH_MS   = 60 * 1000;   // refresh interval (60s)
+constexpr uint32_t IDLE_DIM_MS      = 60 * 1000;   // dim after 60s idle
+constexpr uint32_t IDLE_DEEP_DIM_MS = 5 * 60 * 1000; // deep dim after 5min
+
+#define DEFAULT_CLAUDE_DAILY_BUDGET   5.0f
+#define DEFAULT_CLAUDE_MONTHLY_BUDGET 100.0f
+#define DEFAULT_OPENAI_DAILY_BUDGET   5.0f
+#define DEFAULT_OPENAI_MONTHLY_BUDGET 100.0f
+```
+
+Runtime settings (WiFi credentials, API keys, budgets, timezone) are stored in NVS and configured through the captive portal — never hardcoded.
+
+---
 
 ## OTA Updates
 
-If you set an OTA password during setup, you can push firmware wirelessly:
+Set an OTA password during first-boot setup, then push firmware wirelessly:
 
 ```bash
 pio run -t upload --upload-port tokenjar.local
@@ -99,33 +151,54 @@ pio run -t upload --upload-port tokenjar.local
 
 The device advertises itself via mDNS as `tokenjar.local`.
 
-## Fonts
-
-The firmware ships with LVGL's built-in Montserrat at 10/12/14/48 px. For the intended design (Inter 72 px hero number, JetBrains Mono labels), generate custom fonts with [LVGL's font converter](https://lvgl.io/tools/fontconverter):
-
-```
-lv_font_conv --font Inter-Bold.ttf -r 0x20-0x7E --size 72 --format lvgl --bpp 4 -o src/font_inter_72.c
-lv_font_conv --font JetBrainsMono-Regular.ttf -r 0x20-0x7E --size 12 --format lvgl --bpp 4 -o src/font_jbm_12.c
-```
-
-Then update `src/theme.h` to reference the new font symbols.
-
-## Configuration
-
-Edit `src/config.h` to change pin assignments, default budgets, refresh intervals, or backlight levels. All settings are `constexpr` or `#define` at the top of the file.
-
-Runtime settings (WiFi, API keys, budgets, timezone) are stored in NVS and configured through the captive portal.
+---
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| Display is white or garbled | Check SPI wiring. Try adding `-DTFT_INVERSION_ON` or `-DTFT_INVERSION_OFF` to `build_flags`. Try `tft.setRotation(2)` in `main.cpp`. |
-| Colors are wrong (red/blue swapped) | Toggle `tft.setSwapBytes()` in `main.cpp` or add `-DTFT_RGB_ORDER=TFT_BGR` to `build_flags`. |
-| "$0.00" on all screens | Verify your API key is an **Admin** key, not a regular API key. Check serial monitor for HTTP error codes. |
-| WiFi won't connect | The device falls back to cached data after 30 s. Long-press to retry. To re-enter setup, erase NVS: `pio run -t erase`. |
-| OTA upload fails | Ensure the OTA password matches what was set during setup. The device must be on the same network. |
-| Build fails with "no space" | The 4 MB flash is tight with OTA. Disable unused fonts in `lv_conf.h` or remove OTA by using `default.csv` partitions. |
+| Blank / white screen | Check SPI wiring. Verify `USE_FSPI_PORT` is in `build_flags` (critical for ESP32-S3 — fixes a null-pointer crash in TFT_eSPI). |
+| Colors wrong (red/blue swapped) | Ensure `-DTFT_RGB_ORDER=0` is in `build_flags`. Toggle `-DTFT_INVERSION_ON` / `OFF` if polarity is inverted. |
+| "$0.00" on all screens | Your API key must be an **Admin** key (not a regular API key). Check serial monitor for `[CLAUDE] HTTP 4xx` errors. Also: $0 is correct if you haven't made any direct API calls today. |
+| "Valid=1 but data is empty" | The Admin API only reports API platform usage. Claude.ai Pro web conversations don't appear here. |
+| Portal page won't open | Make sure you're connected to `tokenjar-setup` WiFi. Try `http://192.168.4.1` directly (not HTTPS). Some Android devices auto-switch back to mobile data. |
+| WiFi connect timeout | Device falls back to cached data after 30 s. Long-press to enter setup portal and reconfigure. |
+| OTA upload fails | Ensure OTA password matches setup. Device must be on the same network. |
+| Build fails "no space" | Disable unused fonts in `include/lv_conf.h`. The current build uses ~31% of 4 MB flash. |
+
+---
+
+## Technical Notes
+
+### ESP32-S3 SPI Bug
+
+TFT_eSPI has a critical bug on ESP32-S3: the `FSPI` constant equals `0`, but `REG_SPI_BASE(0)` returns `0x00`, causing a null-pointer crash (`StoreProhibited` at `0x00000010`) inside `tft.init()`.
+
+Fix: `-DUSE_FSPI_PORT` in `build_flags` forces `SPI_PORT = 2`, avoiding the crash. This must be combined with a **full clean rebuild** (`pio run -t clean`) after adding the flag.
+
+### Admin API Endpoints Used
+
+```
+Anthropic:
+  GET /v1/organizations/cost_report?starting_at=...&ending_at=...
+  GET /v1/organizations/usage_report/messages?starting_at=...&ending_at=...
+
+OpenAI:
+  GET /v1/organization/costs?start_time=<unix>&limit=31
+  GET /v1/organization/usage/completions?start_time=<unix>&limit=31
+```
+
+### Partition Layout
+
+Single-app, no OTA partitions (for maximum flash space with 4 MB boards):
+
+```
+nvs       0x9000    20 KB
+otadata   0xe000     8 KB
+app0      0x10000  ~3.9 MB
+```
+
+---
 
 ## License
 

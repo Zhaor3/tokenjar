@@ -39,7 +39,11 @@ static bool oaiGet(const char* url, const char* apiKey, String& body) {
     client.setInsecure();
     HTTPClient http;
 
-    if (!http.begin(client, url)) return false;
+    Serial.printf("[OPENAI] GET %s\n", url);
+    if (!http.begin(client, url)) {
+        Serial.println("[OPENAI] http.begin failed");
+        return false;
+    }
     http.addHeader("Authorization", String("Bearer ") + apiKey);
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(15000);
@@ -47,23 +51,37 @@ static bool oaiGet(const char* url, const char* apiKey, String& body) {
     int code = http.GET();
     if (code == HTTP_CODE_OK) {
         body = http.getString();
+        Serial.printf("[OPENAI] HTTP 200 — %d bytes\n", body.length());
         http.end();
         return true;
     }
+    String errBody = http.getString();
+    Serial.printf("[OPENAI] HTTP %d for %s\n", code, url);
+    Serial.printf("[OPENAI] Error: %.200s\n", errBody.c_str());
     http.end();
     return false;
 }
 
 static float parseCosts(const String& body) {
     JsonDocument doc;
-    if (deserializeJson(doc, body) != DeserializationError::Ok) return 0;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+        Serial.println("[OPENAI] JSON parse failed (costs)");
+        return 0;
+    }
 
     float total = 0;
+    int count = 0;
     for (JsonObject bucket : doc["data"].as<JsonArray>()) {
         for (JsonObject r : bucket["results"].as<JsonArray>()) {
-            total += (r["amount"]["value"] | 0.0f) / 100.0f;   // cents → dollars
+            float val = r["amount"]["value"] | 0.0f;
+            total += val;
+            if (val > 0) {
+                Serial.printf("[OPENAI] cost entry: $%.4f\n", val);
+            }
+            count++;
         }
     }
+    Serial.printf("[OPENAI] Parsed %d cost entries, total=$%.4f\n", count, total);
     return total;
 }
 
@@ -94,8 +112,13 @@ bool OpenAIUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
             (long)dayStart);
 
         String body;
-        if (oaiGet(url, apiKey, body))
+        if (oaiGet(url, apiKey, body)) {
+            Serial.printf("[OPENAI] Today raw: %.100s...\n", body.c_str());
             out.spend_today = parseCosts(body);
+            Serial.printf("[OPENAI] Today spend: $%.4f\n", out.spend_today);
+        } else {
+            Serial.println("[OPENAI] Today cost fetch FAILED");
+        }
     }
 
     // ── Month costs ──────────────────────────────────────────────
@@ -103,7 +126,7 @@ bool OpenAIUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.openai.com/v1/organization/costs"
-            "?start_time=%ld&limit=100",
+            "?start_time=%ld&limit=31",
             (long)monthStart);
 
         String body;
@@ -129,7 +152,7 @@ bool OpenAIUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.openai.com/v1/organization/usage/completions"
-            "?start_time=%ld&limit=100",
+            "?start_time=%ld&limit=31",
             (long)monthStart);
 
         String body;

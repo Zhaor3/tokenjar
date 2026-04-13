@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <SPI.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -47,14 +48,14 @@ static uint32_t stateStart = 0;
 
 // ── LVGL display flush ──────────────────────────────────────────
 
-static void dispFlush(lv_display_t*, const lv_area_t* area, uint8_t* px) {
+static void dispFlush(lv_display_t* d, const lv_area_t* area, uint8_t* px) {
     uint32_t w = area->x2 - area->x1 + 1;
     uint32_t h = area->y2 - area->y1 + 1;
     tft.startWrite();
     tft.setAddrWindow(area->x1, area->y1, w, h);
     tft.pushColors((uint16_t*)px, w * h, true);
     tft.endWrite();
-    lv_display_flush_ready(lv_display_get_default());
+    lv_display_flush_ready(d);
 }
 
 static uint32_t lvTick() { return millis(); }
@@ -112,7 +113,8 @@ hr{border:0;border-top:1px solid #1a1a1a;margin:20px 0}
 </style></head><body>
 <h1>TOKENJAR</h1>
 <label>WIFI NETWORK</label>
-<div id="networks">Scanning...</div>
+<input type="text" id="wssid" placeholder="Type your WiFi name here">
+<div id="networks" style="margin-top:8px">Scanning...</div>
 <label>WIFI PASSWORD</label>
 <input type="password" id="wpass">
 <hr>
@@ -139,15 +141,20 @@ hr{border:0;border-top:1px solid #1a1a1a;margin:20px 0}
 <button onclick="saveConfig()">SAVE &amp; REBOOT</button>
 <div id="sres" class="result"></div>
 <script>
-let selSSID='';
-fetch('/scan').then(r=>r.json()).then(d=>{
-  let el=document.getElementById('networks');el.innerHTML='';
-  d.forEach(n=>{let div=document.createElement('div');
-    div.textContent=n.ssid+' ('+n.rssi+'dBm)';
-    div.onclick=()=>{document.querySelectorAll('#networks div').forEach(x=>x.classList.remove('sel'));
-      div.classList.add('sel');selSSID=n.ssid;};
-    el.appendChild(div);});
-});
+function doScan(tries){
+  fetch('/scan').then(r=>r.json()).then(d=>{
+    let el=document.getElementById('networks');
+    if(!d.length&&tries>0){el.textContent='Scanning... ('+tries+')';setTimeout(()=>doScan(tries-1),3000);return;}
+    if(!d.length){el.textContent='No networks found. Type your SSID above.';return;}
+    el.innerHTML='';
+    d.forEach(n=>{let div=document.createElement('div');
+      div.textContent=n.ssid+' ('+n.rssi+'dBm)';
+      div.onclick=()=>{document.querySelectorAll('#networks div').forEach(x=>x.classList.remove('sel'));
+        div.classList.add('sel');document.getElementById('wssid').value=n.ssid;};
+      el.appendChild(div);});
+  }).catch(()=>{document.getElementById('networks').textContent='Scan failed. Type SSID above.';});
+}
+doScan(5);
 function testApis(){
   let r=document.getElementById('tres');r.textContent='Testing...';r.className='result';
   fetch('/test',{method:'POST',headers:{'Content-Type':'application/json'},
@@ -163,7 +170,7 @@ function testApis(){
 function saveConfig(){
   let r=document.getElementById('sres');r.textContent='Saving...';
   fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({ssid:selSSID,pass:document.getElementById('wpass').value,
+    body:JSON.stringify({ssid:document.getElementById('wssid').value,pass:document.getElementById('wpass').value,
       ckey:document.getElementById('ckey').value,
       okey:document.getElementById('okey').value,
       cbd:parseFloat(document.getElementById('cbd').value),
@@ -181,9 +188,19 @@ function saveConfig(){
 // ── Portal handlers ──────────────────────────────────────────────
 
 static void portalSetup() {
+    WiFi.disconnect(true);
     WiFi.mode(WIFI_AP);
+
+    // Explicit AP config — ensure IP is 192.168.4.1
+    IPAddress local_ip(192, 168, 4, 1);
+    IPAddress gateway(192, 168, 4, 1);
+    IPAddress subnet(255, 255, 255, 0);
+    WiFi.softAPConfig(local_ip, gateway, subnet);
     WiFi.softAP(AP_SSID);
-    delay(100);
+    delay(1000);  // Give AP time to fully start
+
+    Serial.printf("[PORTAL] AP started: SSID=%s  IP=%s\n",
+        AP_SSID, WiFi.softAPIP().toString().c_str());
 
     portal_dns = new DNSServer();
     portal_dns->start(53, "*", WiFi.softAPIP());
@@ -194,8 +211,26 @@ static void portalSetup() {
         portal_server->send_P(200, "text/html", PORTAL_HTML);
     });
 
+    portal_server->on("/ping", HTTP_GET, []() {
+        Serial.println("[PORTAL] /ping hit!");
+        portal_server->send(200, "text/plain", "TOKENJAR OK");
+    });
+
+    // Start a background scan immediately
+    WiFi.scanNetworks(true);  // async=true
+
     portal_server->on("/scan", HTTP_GET, []() {
-        int n = WiFi.scanNetworks();
+        Serial.println("[PORTAL] /scan hit");
+        int n = WiFi.scanComplete();
+        if (n == WIFI_SCAN_RUNNING) {
+            portal_server->send(200, "application/json", "[]");
+            return;
+        }
+        if (n == WIFI_SCAN_FAILED || n < 0) {
+            WiFi.scanNetworks(true);  // retry async
+            portal_server->send(200, "application/json", "[]");
+            return;
+        }
         String json = "[";
         for (int i = 0; i < n; i++) {
             if (i) json += ",";
@@ -203,6 +238,8 @@ static void portalSetup() {
         }
         json += "]";
         portal_server->send(200, "application/json", json);
+        WiFi.scanDelete();
+        WiFi.scanNetworks(true);  // start next scan
     });
 
     portal_server->on("/test", HTTP_POST, []() {
@@ -278,11 +315,13 @@ static void portalTeardown() {
 
 void setup() {
     Serial.begin(115200);
+    delay(1000);
 
-    // Backlight PWM
-    ledcSetup(BL_PWM_CH, BL_PWM_FREQ, BL_PWM_RES);
-    ledcAttachPin(PIN_TFT_BL, BL_PWM_CH);
-    ledcWrite(BL_PWM_CH, BL_FULL);
+    Serial.println("\n=== TOKENJAR v1.0 ===");
+
+    // Backlight — simple digital on (PWM can be added later)
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, HIGH);
 
     // TFT
     tft.init();
@@ -309,6 +348,8 @@ void setup() {
     lv_screen_load(splash);
     state = State::SPLASH;
     stateStart = millis();
+
+    Serial.println("Boot OK — splash shown");
 }
 
 // ── Loop ─────────────────────────────────────────────────────────
@@ -321,12 +362,18 @@ void loop() {
 
     // ── SPLASH ───────────────────────────────────────────────────
     case State::SPLASH:
+        // Long-press during splash → force portal mode
+        if (enc.wasLongPressed()) {
+            Serial.println("Long-press detected — entering setup portal");
+            store.clear();
+        }
         if (millis() - stateStart >= SPLASH_MS) {
             if (!store.hasWiFi()) {
                 portalSetup();
                 lv_obj_t* qr = UIManager::makeQRSetup();
                 lv_screen_load(qr);
                 state = State::PORTAL;
+                Serial.println("No WiFi configured — portal mode");
             } else {
                 WiFi.mode(WIFI_STA);
                 WiFi.begin(store.ssid().c_str(), store.pass().c_str());
@@ -334,19 +381,31 @@ void loop() {
                 lv_screen_load(conn);
                 state = State::CONNECTING;
                 stateStart = millis();
+                Serial.printf("Connecting to %s...\n", store.ssid().c_str());
             }
         }
         break;
 
     // ── CAPTIVE PORTAL ───────────────────────────────────────────
-    case State::PORTAL:
+    case State::PORTAL: {
         portal_dns->processNextRequest();
         portal_server->handleClient();
+        static uint32_t lastDbg = 0;
+        if (millis() - lastDbg > 5000) {
+            lastDbg = millis();
+            Serial.printf("[PORTAL] AP IP=%s  clients=%d  heap=%d\n",
+                WiFi.softAPIP().toString().c_str(),
+                WiFi.softAPgetStationNum(),
+                ESP.getFreeHeap());
+        }
         break;
+    }
 
     // ── CONNECTING ───────────────────────────────────────────────
     case State::CONNECTING:
         if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+
             // Time sync
             configTzTime(store.timezone().c_str(), NTP_SERVER);
 
@@ -374,8 +433,9 @@ void loop() {
             xTaskNotifyGive(apiTask);   // trigger first fetch
 
             state = State::RUNNING;
+            Serial.println("Running — UI active");
         } else if (millis() - stateStart > WIFI_CONNECT_TIMEOUT) {
-            // Timeout — proceed with cached data
+            Serial.println("WiFi timeout — using cached data");
             store.loadCache("claude", claudeSnap);
             store.loadCache("openai", openaiSnap);
             ui.init(store);
@@ -391,10 +451,12 @@ void loop() {
             ui.nextMode();
             ui.onActivity();
         }
-        // Encoder: long press → force refresh
+        // Encoder: long press (3s hold) → re-enter setup portal
         if (enc.wasLongPressed()) {
-            if (apiTask) xTaskNotifyGive(apiTask);
-            ui.onActivity();
+            Serial.println("Long-press — rebooting into setup portal...");
+            store.clear();
+            delay(200);
+            ESP.restart();
         }
         // Encoder: rotation → timeframe
         int rot = enc.rotation();

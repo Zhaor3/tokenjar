@@ -2,3 +2,6 @@
 .vscode/
 .claude/
 include/lv_conf.h
+*.bak
+secrets.h
+credentials.h

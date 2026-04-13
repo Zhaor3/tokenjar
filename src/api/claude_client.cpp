@@ -4,37 +4,34 @@
 #include <ArduinoJson.h>
 #include <time.h>
 
-// Anthropic Admin API — cost_report endpoint.
-// Docs: https://docs.anthropic.com/en/api/admin-api
-// Expected response shape (simplified):
-// {
-//   "data": [
-//     { "date": "2024-01-15", "cost_usd": 3.21,
-//       "input_tokens": 500000, "output_tokens": 200000 }
-//   ]
-// }
-// Adjust the JSON path below if the real schema differs.
+// Anthropic Admin API
+// Docs: https://platform.claude.com/docs/en/api/admin-api/usage-cost
+// Cost report: GET /v1/organizations/cost_report?starting_at=...&ending_at=...
+//   Response: { "data": [ { "results": [ { "amount": "123.45", "currency": "USD", ... } ] } ] }
+//   amount is a STRING in CENTS (lowest currency unit)
+// Usage report: GET /v1/organizations/usage_report/messages?starting_at=...&ending_at=...
+//   Response: { "data": [ { "results": [ { "uncached_input_tokens": N, "output_tokens": N, ... } ] } ] }
 
-static void todayStr(char* buf, size_t len) {
+// RFC 3339 date formatters (UTC)
+static void todayStartUTC(char* buf, size_t len) {
     time_t now = time(nullptr);
     struct tm t;
-    localtime_r(&now, &t);
-    strftime(buf, len, "%Y-%m-%d", &t);
+    gmtime_r(&now, &t);
+    strftime(buf, len, "%Y-%m-%dT00:00:00Z", &t);
 }
 
-static void monthStartStr(char* buf, size_t len) {
-    time_t now = time(nullptr);
-    struct tm t;
-    localtime_r(&now, &t);
-    t.tm_mday = 1;
-    strftime(buf, len, "%Y-%m-%d", &t);
-}
-
-static void tomorrowStr(char* buf, size_t len) {
+static void tomorrowStartUTC(char* buf, size_t len) {
     time_t now = time(nullptr) + 86400;
     struct tm t;
-    localtime_r(&now, &t);
-    strftime(buf, len, "%Y-%m-%d", &t);
+    gmtime_r(&now, &t);
+    snprintf(buf, len, "%04d-%02d-%02dT00:00:00Z", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+}
+
+static void monthStartUTC(char* buf, size_t len) {
+    time_t now = time(nullptr);
+    struct tm t;
+    gmtime_r(&now, &t);
+    snprintf(buf, len, "%04d-%02d-01T00:00:00Z", t.tm_year + 1900, t.tm_mon + 1);
 }
 
 static bool apiGet(const char* url, const char* apiKey, String& body) {
@@ -42,7 +39,11 @@ static bool apiGet(const char* url, const char* apiKey, String& body) {
     client.setInsecure();
     HTTPClient http;
 
-    if (!http.begin(client, url)) return false;
+    Serial.printf("[CLAUDE] GET %s\n", url);
+    if (!http.begin(client, url)) {
+        Serial.println("[CLAUDE] http.begin failed");
+        return false;
+    }
     http.addHeader("x-api-key", apiKey);
     http.addHeader("anthropic-version", "2023-06-01");
     http.setTimeout(15000);
@@ -50,40 +51,89 @@ static bool apiGet(const char* url, const char* apiKey, String& body) {
     int code = http.GET();
     if (code == HTTP_CODE_OK) {
         body = http.getString();
+        Serial.printf("[CLAUDE] HTTP 200 — %d bytes\n", body.length());
         http.end();
         return true;
     }
+    // Print error body for debugging
+    String errBody = http.getString();
+    Serial.printf("[CLAUDE] HTTP %d for %s\n", code, url);
+    Serial.printf("[CLAUDE] Error: %.200s\n", errBody.c_str());
     http.end();
     return false;
 }
 
+// Parse cost from data[].results[].amount (string in cents)
+static float parseCostResponse(const String& body) {
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+        Serial.println("[CLAUDE] JSON parse failed");
+        return 0;
+    }
+    float total = 0;
+    int count = 0;
+    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
+        for (JsonObject r : bucket["results"].as<JsonArray>()) {
+            // amount is a decimal string in cents, e.g. "123.45" = $1.2345
+            float cents = 0;
+            if (r["amount"].is<const char*>()) {
+                cents = String(r["amount"].as<const char*>()).toFloat();
+            } else {
+                cents = r["amount"].as<float>();
+            }
+            total += cents / 100.0f;
+            count++;
+        }
+    }
+    Serial.printf("[CLAUDE] Parsed %d cost entries, total=$%.4f\n", count, total);
+    return total;
+}
+
+// Parse tokens from data[].results[]
+static uint64_t parseTokenResponse(const String& body) {
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) {
+        Serial.println("[CLAUDE] JSON parse failed (tokens)");
+        return 0;
+    }
+    uint64_t total = 0;
+    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
+        for (JsonObject r : bucket["results"].as<JsonArray>()) {
+            total += (uint64_t)(r["uncached_input_tokens"] | 0) +
+                     (uint64_t)(r["output_tokens"] | 0) +
+                     (uint64_t)(r["cache_read_input_tokens"] | 0);
+        }
+    }
+    return total;
+}
+
 bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
     memset(&out, 0, sizeof(out));
+    bool gotData = false;
 
-    char today[16], tomorrow[16], monthStart[16];
-    todayStr(today, sizeof(today));
-    tomorrowStr(tomorrow, sizeof(tomorrow));
-    monthStartStr(monthStart, sizeof(monthStart));
+    char todayStart[32], tomorrowStart[32], monthStart[32];
+    todayStartUTC(todayStart, sizeof(todayStart));
+    tomorrowStartUTC(tomorrowStart, sizeof(tomorrowStart));
+    monthStartUTC(monthStart, sizeof(monthStart));
+
+    Serial.printf("[CLAUDE] Date range: today=%s tomorrow=%s month=%s\n",
+        todayStart, tomorrowStart, monthStart);
 
     // ── Today's cost ─────────────────────────────────────────────
     {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.anthropic.com/v1/organizations/cost_report"
-            "?start_date=%s&end_date=%s",
-            today, tomorrow);
+            "?starting_at=%s&ending_at=%s",
+            todayStart, tomorrowStart);
 
         String body;
         if (apiGet(url, apiKey, body)) {
-            JsonDocument doc;
-            if (deserializeJson(doc, body) == DeserializationError::Ok) {
-                JsonArray data = doc["data"].as<JsonArray>();
-                for (JsonObject row : data) {
-                    out.spend_today  += row["cost_usd"] | 0.0f;
-                    out.tokens_today += (uint64_t)(row["input_tokens"] | 0) +
-                                       (uint64_t)(row["output_tokens"] | 0);
-                }
-            }
+            gotData = true;
+            Serial.printf("[CLAUDE] Today cost raw: %.400s\n", body.c_str());
+            out.spend_today = parseCostResponse(body);
+        } else {
+            Serial.println("[CLAUDE] Today cost fetch FAILED");
         }
     }
 
@@ -92,37 +142,64 @@ bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.anthropic.com/v1/organizations/cost_report"
-            "?start_date=%s&end_date=%s",
-            monthStart, tomorrow);
+            "?starting_at=%s&ending_at=%s",
+            monthStart, tomorrowStart);
 
         String body;
         if (apiGet(url, apiKey, body)) {
-            JsonDocument doc;
-            if (deserializeJson(doc, body) == DeserializationError::Ok) {
-                JsonArray data = doc["data"].as<JsonArray>();
-                for (JsonObject row : data) {
-                    out.spend_month  += row["cost_usd"] | 0.0f;
-                    out.tokens_month += (uint64_t)(row["input_tokens"] | 0) +
-                                       (uint64_t)(row["output_tokens"] | 0);
-                }
-
-                // Build hourly buckets from daily rows (API granularity is daily;
-                // distribute evenly across hours that have elapsed so far)
-                time_t now = time(nullptr);
-                struct tm tn;
-                localtime_r(&now, &tn);
-                int hours_today = tn.tm_hour + 1;
-                float per_hour = (hours_today > 0) ? out.spend_today / hours_today : 0;
-                for (int i = 0; i < SPARK_POINTS; i++) {
-                    out.hourly_spend[i] = (i >= SPARK_POINTS - hours_today) ? per_hour : 0;
-                }
-            }
+            gotData = true;
+            Serial.printf("[CLAUDE] Month cost raw: %.200s...\n", body.c_str());
+            out.spend_month = parseCostResponse(body);
         }
     }
 
+    // ── Today's tokens ───────────────────────────────────────────
+    {
+        char url[256];
+        snprintf(url, sizeof(url),
+            "https://api.anthropic.com/v1/organizations/usage_report/messages"
+            "?starting_at=%s&ending_at=%s&bucket_width=1d",
+            todayStart, tomorrowStart);
+
+        String body;
+        if (apiGet(url, apiKey, body)) {
+            gotData = true;
+            Serial.printf("[CLAUDE] Today tokens raw: %.400s\n", body.c_str());
+            out.tokens_today = parseTokenResponse(body);
+            Serial.printf("[CLAUDE] tokens_today = %llu\n", (unsigned long long)out.tokens_today);
+        }
+    }
+
+    // ── Month tokens ─────────────────────────────────────────────
+    {
+        char url[256];
+        snprintf(url, sizeof(url),
+            "https://api.anthropic.com/v1/organizations/usage_report/messages"
+            "?starting_at=%s&ending_at=%s&bucket_width=1d",
+            monthStart, tomorrowStart);
+
+        String body;
+        if (apiGet(url, apiKey, body)) {
+            gotData = true;
+            out.tokens_month = parseTokenResponse(body);
+            Serial.printf("[CLAUDE] tokens_month = %llu\n", (unsigned long long)out.tokens_month);
+        }
+    }
+
+    // Build sparkline (distribute daily cost across elapsed hours)
+    time_t now = time(nullptr);
+    struct tm tn;
+    localtime_r(&now, &tn);
+    int hours_today = tn.tm_hour + 1;
+    float per_hour = (hours_today > 0) ? out.spend_today / hours_today : 0;
+    for (int i = 0; i < SPARK_POINTS; i++)
+        out.hourly_spend[i] = (i >= SPARK_POINTS - hours_today) ? per_hour : 0;
+
     out.last_updated = time(nullptr);
-    out.valid = (out.spend_today > 0 || out.spend_month > 0 || out.tokens_today > 0);
-    // Even if values are zero, mark valid if we got a successful HTTP response
-    if (out.last_updated > 1000000) out.valid = true;
+    out.valid = gotData;
+    Serial.printf("[CLAUDE] FINAL: today=$%.4f month=$%.4f tok_today=%llu tok_month=%llu valid=%d\n",
+        out.spend_today, out.spend_month,
+        (unsigned long long)out.tokens_today, (unsigned long long)out.tokens_month,
+        out.valid);
     return out.valid;
 }

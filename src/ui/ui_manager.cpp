@@ -40,7 +40,7 @@ void UIManager::init(SettingsStore& store) {
     bl_target_ = BL_FULL;
     bl_current_= BL_FULL;
     last_act_  = millis();
-    ledcWrite(BL_PWM_CH, BL_FULL);
+    analogWrite(PIN_TFT_BL, BL_FULL);
 
     if (num_modes_ > 0) {
         lv_obj_t* first = screenForMode(modes_[0]);
@@ -176,7 +176,7 @@ void UIManager::updateBacklight() {
         int step = diff / 8;
         if (step == 0) step = (diff > 0) ? 1 : -1;
         bl_current_ = (uint8_t)((int)bl_current_ + step);
-        ledcWrite(BL_PWM_CH, bl_current_);
+        analogWrite(PIN_TFT_BL, bl_current_);
     }
 }
 
@@ -223,36 +223,36 @@ lv_obj_t* UIManager::makeQRSetup() {
     uint8_t qrcodeBytes[qrcode_getBufferSize(3)];
     qrcode_initText(&qrcode, qrcodeBytes, 3, ECC_LOW, "HTTP://192.168.4.1");
 
-    int scale = 5;
-    int qr_px = qrcode.size * scale;
+    int scale = 4;
+    int qr_px = qrcode.size * scale;  // 29*4 = 116
 
-    // Draw QR with canvas
+    // Draw QR directly into RGB565 buffer (no LVGL draw calls)
     static uint8_t* qr_buf = nullptr;
     if (!qr_buf) qr_buf = (uint8_t*)malloc(qr_px * qr_px * 2);
 
     if (qr_buf) {
-        lv_obj_t* canvas = lv_canvas_create(scr);
-        lv_canvas_set_buffer(canvas, qr_buf, qr_px, qr_px, LV_COLOR_FORMAT_RGB565);
-        lv_canvas_fill_bg(canvas, Color::text(), LV_OPA_COVER);
+        uint16_t* px = (uint16_t*)qr_buf;
+        uint16_t white = lv_color_to_u16(Color::text());
+        uint16_t black = lv_color_to_u16(Color::bg());
 
-        lv_layer_t layer;
-        lv_canvas_init_layer(canvas, &layer);
+        // Fill white background
+        for (int i = 0; i < qr_px * qr_px; i++) px[i] = white;
+
+        // Draw dark modules
         for (int y = 0; y < (int)qrcode.size; y++) {
             for (int x = 0; x < (int)qrcode.size; x++) {
                 if (qrcode_getModule(&qrcode, x, y)) {
-                    lv_draw_rect_dsc_t r;
-                    lv_draw_rect_dsc_init(&r);
-                    r.bg_color = Color::bg();
-                    r.bg_opa   = LV_OPA_COVER;
-                    lv_area_t a = {
-                        (int32_t)(x * scale), (int32_t)(y * scale),
-                        (int32_t)((x + 1) * scale - 1), (int32_t)((y + 1) * scale - 1)
-                    };
-                    lv_draw_rect(&layer, &r, &a);
+                    for (int dy = 0; dy < scale; dy++) {
+                        for (int dx = 0; dx < scale; dx++) {
+                            px[(y * scale + dy) * qr_px + (x * scale + dx)] = black;
+                        }
+                    }
                 }
             }
         }
-        lv_canvas_finish_layer(canvas, &layer);
+
+        lv_obj_t* canvas = lv_canvas_create(scr);
+        lv_canvas_set_buffer(canvas, qr_buf, qr_px, qr_px, LV_COLOR_FORMAT_RGB565);
         lv_obj_align(canvas, LV_ALIGN_CENTER, 0, -30);
     }
 

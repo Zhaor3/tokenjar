@@ -24,7 +24,7 @@ constexpr uint16_t SCREEN_H = 320;
 #define DEFAULT_OPENAI_MONTHLY_BUDGET 100.0f
 
 // ── Timing ───────────────────────────────────────────────────────
-constexpr uint32_t API_REFRESH_MS       = 5 * 60 * 1000;
+constexpr uint32_t API_REFRESH_MS       = 60 * 1000;   // 60 seconds
 constexpr uint32_t IDLE_DIM_MS          = 60 * 1000;
 constexpr uint32_t IDLE_DEEP_DIM_MS     = 5 * 60 * 1000;
 constexpr uint32_t WIFI_CONNECT_TIMEOUT = 30000;

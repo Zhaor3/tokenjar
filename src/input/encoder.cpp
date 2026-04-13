@@ -3,11 +3,12 @@
 #include <Arduino.h>
 #include <ESP32Encoder.h>
 
-static ESP32Encoder hw;
+static ESP32Encoder* hw = nullptr;
 
 void Encoder::begin() {
-    hw.attachHalfQuad(PIN_ENC_DT, PIN_ENC_CLK);
-    hw.setCount(0);
+    hw = new ESP32Encoder();
+    hw->attachHalfQuad(PIN_ENC_DT, PIN_ENC_CLK);
+    hw->setCount(0);
     last_count_ = 0;
 
     pinMode(PIN_ENC_SW, INPUT_PULLUP);
@@ -18,7 +19,8 @@ void Encoder::update() {
     uint32_t now = millis();
 
     // ── Rotation ─────────────────────────────────────────────────
-    int64_t cnt = hw.getCount();
+    if (!hw) return;
+    int64_t cnt = hw->getCount();
     int64_t delta = cnt - last_count_;
     if (delta != 0) {
         // One detent = 2 half-quads on most EC11 encoders
