@@ -1,6 +1,8 @@
 #include "ui/ui_manager.h"
 #include "ui/screen_provider.h"
 #include "ui/screen_provider_h.h"
+#include "ui/screen_settings.h"
+#include "ui/screen_settings_h.h"
 #include "ui/screen_plan.h"
 #include "ui/screen_plan_h.h"
 #include "ui/i_screen_plan.h"
@@ -46,6 +48,11 @@ void UIManager::init(SettingsStore& store, bool horizontal) {
         modes_[num_modes_++] = Mode::OPENAI;
     }
 
+    scr_settings_ = horizontal
+        ? static_cast<IScreenSettings*>(new ScreenSettingsH())
+        : static_cast<IScreenSettings*>(new ScreenSettings());
+    modes_[num_modes_++] = Mode::SETTINGS;
+
     cur_idx_   = 0;
     bl_target_ = BL_FULL;
     bl_current_= BL_FULL;
@@ -65,6 +72,7 @@ lv_obj_t* UIManager::screenForMode(Mode m) {
         case Mode::CLAUDE:      return scr_claude_      ? scr_claude_->screen()      : nullptr;
         case Mode::CLAUDE_PLAN: return scr_claude_plan_ ? scr_claude_plan_->screen() : nullptr;
         case Mode::OPENAI:      return scr_openai_      ? scr_openai_->screen()      : nullptr;
+        case Mode::SETTINGS:    return scr_settings_    ? scr_settings_->screen()    : nullptr;
         default: return nullptr;
     }
 }
@@ -117,6 +125,8 @@ void UIManager::updateData(const UsageSnapshot& claude,
         scr_claude_->update(claude, cd, cm, timeframe_);
     if (scr_openai_)
         scr_openai_->update(openai, od, om, timeframe_);
+    if (scr_settings_)
+        scr_settings_->update(store);
 }
 
 // ── Plan data push (independent 5-min cadence) ───────────────────
@@ -136,6 +146,7 @@ void UIManager::tick() {
     if (scr_claude_)      scr_claude_->refreshClock();
     if (scr_claude_plan_) scr_claude_plan_->refreshClock();
     if (scr_openai_)      scr_openai_->refreshClock();
+    if (scr_settings_)    scr_settings_->refreshClock();
 }
 
 // ── Backlight / idle ─────────────────────────────────────────────

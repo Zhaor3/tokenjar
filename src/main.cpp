@@ -598,9 +598,11 @@ void loop() {
             delay(200);
             ESP.restart();
         }
-        // Encoder: rotation → refresh all data
+        // Encoder: rotation → change timeframe + refresh all data
         int rot = enc.rotation();
         if (rot != 0) {
+            ui.adjustTimeframe(rot);
+            ui.updateData(claudeSnap, openaiSnap, store);
             last_plan_fetch_ms = 0;
             if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();

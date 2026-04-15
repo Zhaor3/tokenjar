@@ -5,6 +5,7 @@
 
 class SettingsStore;
 class IScreenProvider;
+class IScreenSettings;
 class IScreenPlan;
 
 // Provider-level modes.  Button press cycles through these.
@@ -14,6 +15,7 @@ enum class Mode : uint8_t {
     CLAUDE,           // Admin API spend (timeframe via rotation)
     CLAUDE_PLAN,      // Pro/Max subscription usage (session key)
     OPENAI,           // Admin API spend (timeframe via rotation)
+    SETTINGS,
     _COUNT
 };
 
@@ -22,11 +24,12 @@ class UIManager {
     IScreenProvider* scr_claude_      = nullptr;
     IScreenPlan*     scr_claude_plan_ = nullptr;
     IScreenProvider* scr_openai_      = nullptr;
+    IScreenSettings* scr_settings_    = nullptr;
 
     bool horizontal_ = true;
 
     // Active mode list (populated from available API keys)
-    static constexpr int MAX_MODES = 3;
+    static constexpr int MAX_MODES = 4;
     Mode     modes_[MAX_MODES];
     int      num_modes_  = 0;
     int      cur_idx_    = 0;
