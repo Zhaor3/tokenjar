@@ -584,27 +584,25 @@ void loop() {
 
     // ── RUNNING ──────────────────────────────────────────────────
     case State::RUNNING: {
-        // Encoder: short press → next mode
+        // Encoder: short press → next mode + refresh all data
         if (enc.wasPressed()) {
             ui.nextMode();
+            last_plan_fetch_ms = 0;
+            if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();
         }
-        // Encoder: long press → force-refresh data for the current screen.
-        // (To re-enter setup portal, long-press during the splash screen.)
+        // Encoder: long press → factory reset, re-enter setup portal
         if (enc.wasLongPressed()) {
-            Mode m = ui.currentMode();
-            Serial.printf("Long-press — force refresh (mode %d)\n", (int)m);
-            if (m == Mode::CLAUDE_PLAN) {
-                last_plan_fetch_ms = 0;   // bypass 5-min gate
-            }
-            if (apiTask) xTaskNotifyGive(apiTask);   // wake API task now
-            ui.onActivity();
+            Serial.println("Long-press — rebooting into setup portal...");
+            store.clear();
+            delay(200);
+            ESP.restart();
         }
-        // Encoder: rotation → timeframe
+        // Encoder: rotation → refresh all data
         int rot = enc.rotation();
         if (rot != 0) {
-            ui.adjustTimeframe(rot);
-            ui.updateData(claudeSnap, openaiSnap, store);
+            last_plan_fetch_ms = 0;
+            if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();
         }
 
