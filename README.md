@@ -32,26 +32,58 @@ TokenJar connects to the **Admin API** of each platform and displays:
 
 ### Wiring
 
-```
-ST7789 Display          ESP32-S3 SuperMini
-──────────────          ──────────────────
-VCC  ──────────────────  3.3V
-GND  ──────────────────  GND
-SCL  ──────────────────  GPIO 7   (SCK)
-SDA  ──────────────────  GPIO 9   (MOSI)
-CS   ──────────────────  GPIO 5
-DC   ──────────────────  GPIO 4
-RES  ──────────────────  GPIO 6
-BL   ──────────────────  GPIO 10  (PWM backlight)
+#### ST7789 Display (8-pin)
 
-EC11 Encoder            ESP32-S3 SuperMini
-────────────            ──────────────────
-CLK  ──────────────────  GPIO 1
-DT   ──────────────────  GPIO 2
-SW   ──────────────────  GPIO 3   (active low)
-+    ──────────────────  3.3V
-GND  ──────────────────  GND
+| Display Pin | Connects to | Notes |
+|-------------|-------------|-------|
+| **VCC** | 3.3V | Do **not** use 5V |
+| **GND** | GND | |
+| **DIN** | GPIO 9 | Data In (SPI MOSI) |
+| **CLK** | GPIO 7 | SPI clock (SCK) |
+| **CS**  | GPIO 5 | Chip select |
+| **DC**  | GPIO 4 | Data / command select |
+| **RST** | GPIO 6 | Reset |
+| **BL**  | GPIO 10 | Backlight (PWM dimming) |
+
+#### Rotary Encoder (KY-040, 5-pin)
+
+The encoder has **3 pins on one side** and **2 pins on the other**:
+
 ```
+   ┌─────────────┐
+   │  GND +  SW  │   ← 3-pin side
+   │             │
+   │   (knob)    │
+   │             │
+   │    DT  CLK  │   ← 2-pin side
+   └─────────────┘
+```
+
+| Encoder Pin | Side | Connects to | Notes |
+|-------------|------|-------------|-------|
+| **GND** | 3-pin | GND | |
+| **+** (VCC) | 3-pin | **3.3V only** — never 5V |
+| **SW** | 3-pin | GPIO 8 | Push-button, active low |
+| **DT** | 2-pin | GPIO 2 | Rotation signal B |
+| **CLK** | 2-pin | GPIO 1 | Rotation signal A |
+
+> **If rotation direction feels backwards**, swap the **CLK** and **DT** wires (GPIO 1 ↔ GPIO 2).  
+> **No external pull-up resistors needed** — the ESP32-S3 uses its internal pull-up on the SW pin.
+
+#### ⚠️ Pins to AVOID on ESP32-S3 SuperMini
+
+If the device **reboots when you press or spin the encoder**, you probably hit one of these:
+
+| Pin | Why to avoid |
+|-----|--------------|
+| **EN** / **RST** | Chip reset — connecting SW here literally reboots the board on every press |
+| **GPIO 0** | BOOT button — pulling low can force download mode |
+| **GPIO 3** | Strapping pin (JTAG select) — can interfere at boot |
+| **GPIO 19 / 20** | USB D- / D+ — used by USB CDC, will crash |
+| **GPIO 26–32** | Internal SPI flash — any use will hang the chip |
+| **GPIO 45 / 46** | Strapping pins (flash voltage / boot mode) |
+
+**Safe GPIO inputs for the encoder:** 1, 2, 4, 8, 11, 12, 13, 14, 15, 16, 17, 18, 21 (most are ADC-capable). The display already uses 4, 5, 6, 7, 9, 10, so avoid those.
 
 ---
 

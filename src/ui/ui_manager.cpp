@@ -1,6 +1,8 @@
 #include "ui/ui_manager.h"
 #include "ui/screen_provider.h"
+#include "ui/screen_provider_h.h"
 #include "ui/screen_settings.h"
+#include "ui/screen_settings_h.h"
 #include "storage/settings_store.h"
 #include "config.h"
 #include "theme.h"
@@ -11,29 +13,38 @@ using namespace Theme;
 
 // ── Initialization ───────────────────────────────────────────────
 
-void UIManager::init(SettingsStore& store) {
+// Construct a provider screen in the appropriate orientation.
+static IScreenProvider* makeProviderScreen(bool horizontal, const char* name, lv_color_t accent) {
+    if (horizontal) return new ScreenProviderH(name, accent);
+    return new ScreenProvider(name, accent);
+}
+
+void UIManager::init(SettingsStore& store, bool horizontal) {
+    horizontal_ = horizontal;
     bool has_c = store.hasClaude();
     bool has_o = store.hasOpenAI();
     num_modes_ = 0;
 
     if (has_c) {
-        scr_claude_today_ = new ScreenProvider("CLAUDE", Color::claude());
-        scr_claude_month_ = new ScreenProvider("CLAUDE", Color::claude());
+        scr_claude_today_ = makeProviderScreen(horizontal, "CLAUDE", Color::claude());
+        scr_claude_month_ = makeProviderScreen(horizontal, "CLAUDE", Color::claude());
         modes_[num_modes_++] = Mode::CLAUDE_TODAY;
         modes_[num_modes_++] = Mode::CLAUDE_MONTH;
     }
     if (has_o) {
-        scr_openai_today_ = new ScreenProvider("OPENAI", Color::openai());
-        scr_openai_month_ = new ScreenProvider("OPENAI", Color::openai());
+        scr_openai_today_ = makeProviderScreen(horizontal, "OPENAI", Color::openai());
+        scr_openai_month_ = makeProviderScreen(horizontal, "OPENAI", Color::openai());
         modes_[num_modes_++] = Mode::OPENAI_TODAY;
         modes_[num_modes_++] = Mode::OPENAI_MONTH;
     }
     if (has_c && has_o) {
-        scr_combined_ = new ScreenProvider("COMBINED", Color::combined());
+        scr_combined_ = makeProviderScreen(horizontal, "COMBINED", Color::combined());
         modes_[num_modes_++] = Mode::COMBINED;
     }
 
-    scr_settings_ = new ScreenSettings();
+    scr_settings_ = horizontal
+        ? static_cast<IScreenSettings*>(new ScreenSettingsH())
+        : static_cast<IScreenSettings*>(new ScreenSettings());
     modes_[num_modes_++] = Mode::SETTINGS;
 
     cur_idx_   = 0;
@@ -62,7 +73,7 @@ lv_obj_t* UIManager::screenForMode(Mode m) {
     }
 }
 
-ScreenProvider* UIManager::providerForMode(Mode m) {
+IScreenProvider* UIManager::providerForMode(Mode m) {
     switch (m) {
         case Mode::CLAUDE_TODAY:  return scr_claude_today_;
         case Mode::CLAUDE_MONTH: return scr_claude_month_;
@@ -87,7 +98,7 @@ void UIManager::nextMode() {
     cur_idx_ = (cur_idx_ + 1) % num_modes_;
     transitionTo(cur_idx_);
 
-    ScreenProvider* sp = providerForMode(modes_[cur_idx_]);
+    IScreenProvider* sp = providerForMode(modes_[cur_idx_]);
     if (sp) sp->flashHero();
 }
 
@@ -312,4 +323,74 @@ lv_obj_t* UIManager::makeSyncing() {
     lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
 
     return scr;
+}
+
+// ── Orientation choice screen (first boot) ───────────────────────
+// Small static state so the caller can drive selection via encoder.
+static lv_obj_t* s_orient_lbl_h = nullptr;
+static lv_obj_t* s_orient_lbl_v = nullptr;
+static bool      s_orient_sel_horizontal = true;
+
+lv_obj_t* UIManager::makeOrientationChoice() {
+    s_orient_sel_horizontal = true;
+
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, Color::bg(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+
+    // Title
+    lv_obj_t* title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, Font::label(), 0);
+    lv_obj_set_style_text_color(title, Color::dim(), 0);
+    lv_obj_set_style_text_letter_space(title, 3, 0);
+    lv_label_set_text(title, "CHOOSE ORIENTATION");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 28);
+
+    // Horizontal option
+    s_orient_lbl_h = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_orient_lbl_h, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_orient_lbl_h, 3, 0);
+    lv_obj_align(s_orient_lbl_h, LV_ALIGN_CENTER, 0, -14);
+
+    // Vertical option
+    s_orient_lbl_v = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_orient_lbl_v, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_orient_lbl_v, 3, 0);
+    lv_obj_align(s_orient_lbl_v, LV_ALIGN_CENTER, 0, 18);
+
+    // Hint at bottom
+    lv_obj_t* hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(hint, Font::small(), 0);
+    lv_obj_set_style_text_color(hint, Color::vdim(), 0);
+    lv_label_set_text(hint, "TURN TO CHANGE  *  CLICK TO CONFIRM");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    // Render default selection (horizontal)
+    orientationChoiceSetSel(true);
+    return scr;
+}
+
+void UIManager::orientationChoiceSetSel(bool horizontal) {
+    s_orient_sel_horizontal = horizontal;
+    if (!s_orient_lbl_h || !s_orient_lbl_v) return;
+
+    if (horizontal) {
+        lv_label_set_text(s_orient_lbl_h, ">  HORIZONTAL  <");
+        lv_label_set_text(s_orient_lbl_v, "   VERTICAL");
+        lv_obj_set_style_text_color(s_orient_lbl_h, Color::claude(), 0);
+        lv_obj_set_style_text_color(s_orient_lbl_v, Color::dim(),    0);
+    } else {
+        lv_label_set_text(s_orient_lbl_h, "   HORIZONTAL");
+        lv_label_set_text(s_orient_lbl_v, ">  VERTICAL  <");
+        lv_obj_set_style_text_color(s_orient_lbl_h, Color::dim(),    0);
+        lv_obj_set_style_text_color(s_orient_lbl_v, Color::claude(), 0);
+    }
+    // Re-align since label widths change when arrows get added/removed
+    lv_obj_align(s_orient_lbl_h, LV_ALIGN_CENTER, 0, -14);
+    lv_obj_align(s_orient_lbl_v, LV_ALIGN_CENTER, 0,  18);
+}
+
+bool UIManager::orientationChoiceGetSel() {
+    return s_orient_sel_horizontal;
 }

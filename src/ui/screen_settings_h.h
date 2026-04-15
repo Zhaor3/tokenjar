@@ -4,7 +4,9 @@
 
 class SettingsStore;
 
-class ScreenSettings : public IScreenSettings {
+// Horizontal (landscape, 320×240) settings screen.
+// Two-column layout makes good use of the extra width.
+class ScreenSettingsH : public IScreenSettings {
     lv_obj_t* scr_         = nullptr;
     lv_obj_t* lbl_title_   = nullptr;
     lv_obj_t* lbl_wifi_    = nullptr;
@@ -18,8 +20,8 @@ class ScreenSettings : public IScreenSettings {
     void buildLayout();
 
 public:
-    ScreenSettings();
-    ~ScreenSettings() override = default;
+    ScreenSettingsH();
+    ~ScreenSettingsH() override = default;
     void update(const SettingsStore& store) override;
     void refreshClock() override;
     lv_obj_t* screen() const override { return scr_; }

@@ -39,6 +39,12 @@ public:
     String otaPass();
     bool   hasOTAPass();
 
+    // Display orientation ("horizontal" | "vertical")
+    void   setOrientation(const String& o);
+    String orientation();
+    bool   hasOrientation();
+    bool   orientationHorizontal();  // true if horizontal (default)
+
     // Cached snapshots (survive reboot)
     void saveCache(const char* provider, const UsageSnapshot& s);
     bool loadCache(const char* provider, UsageSnapshot& s);

@@ -9,13 +9,23 @@ constexpr int PIN_TFT_DC   = 4;
 constexpr int PIN_TFT_RST  = 6;
 constexpr int PIN_TFT_BL   = 10;
 
-constexpr int PIN_ENC_CLK = 1;
-constexpr int PIN_ENC_DT  = 2;
-constexpr int PIN_ENC_SW  = 3;   // active low, internal pull-up
+constexpr int PIN_ENC_CLK = 1;   // ADC1_CH0, safe GPIO
+constexpr int PIN_ENC_DT  = 2;   // ADC1_CH1, safe GPIO
+constexpr int PIN_ENC_SW  = 8;   // active low, internal pull-up
+                                 // Avoid GPIO 3 (strapping pin for JTAG select)
+                                 // Avoid GPIO 0 (BOOT button) and GPIO 19/20 (USB)
 
 // ── Display ──────────────────────────────────────────────────────
+// Vertical (portrait) dimensions — rotation 0
 constexpr uint16_t SCREEN_W = 240;
 constexpr uint16_t SCREEN_H = 320;
+
+// Horizontal (landscape) dimensions — rotation 1
+constexpr uint16_t SCREEN_W_H = 320;
+constexpr uint16_t SCREEN_H_H = 240;
+
+// Max screen dimension (used for LVGL draw buffer sizing across orientations)
+constexpr int SCREEN_MAX_DIM = (SCREEN_W > SCREEN_H) ? SCREEN_W : SCREEN_H;
 
 // ── Budget defaults (override before flashing) ───────────────────
 #define DEFAULT_CLAUDE_DAILY_BUDGET   5.0f
@@ -49,3 +59,7 @@ constexpr const char* DEFAULT_TZ  = "EST5EDT,M3.2.0,M11.1.0";
 constexpr int SPARK_W      = 208;
 constexpr int SPARK_H      = 24;
 constexpr int SPARK_POINTS = 24;
+
+// Sparkline dimensions for horizontal layout (side-of-hero sparkline)
+constexpr int SPARK_W_H    = 124;
+constexpr int SPARK_H_H    = 44;

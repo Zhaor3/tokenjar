@@ -3,7 +3,11 @@
 #include "api/usage_provider.h"
 #include "ui/i_screen_provider.h"
 
-class ScreenProvider : public IScreenProvider {
+// Horizontal (landscape, 320×240) provider screen.
+// Mirrors ScreenProvider but places the hero dollar amount on the left
+// and the sparkline on the right, with the budget/progress strip across
+// the lower half of the screen.
+class ScreenProviderH : public IScreenProvider {
     lv_obj_t* scr_         = nullptr;
     lv_obj_t* lbl_name_    = nullptr;
     lv_obj_t* lbl_time_    = nullptr;
@@ -17,25 +21,24 @@ class ScreenProvider : public IScreenProvider {
     lv_obj_t* canvas_spark_= nullptr;
     lv_obj_t* lbl_footer_  = nullptr;
 
-    lv_color_t accent_;
+    lv_color_t  accent_;
     const char* provider_name_;
-    float       hero_val_ = 0;
     uint8_t*    spark_buf_ = nullptr;
 
     void buildLayout();
+
 public:
-    ScreenProvider(const char* name, lv_color_t accent);
-    ~ScreenProvider() override;
+    ScreenProviderH(const char* name, lv_color_t accent);
+    ~ScreenProviderH() override;
 
     void update(const UsageSnapshot& snap,
                 float daily_budget, float monthly_budget,
                 Timeframe tf) override;
     void refreshClock() override;
-    void flashHero() override;              // press feedback
+    void flashHero() override;
     lv_obj_t* screen() const override { return scr_; }
 
     // Non-interface helpers
     void setStatusDot(lv_color_t color);
-    void drawSparkline(const float* data, int count, int segments);
-    void animateSparkline(const float* data, int count);
+    void drawSparkline(const float* data, int count);
 };

@@ -36,6 +36,15 @@ void   SettingsStore::setOTAPass(const String& p) { prefs_.putString("ota_pass",
 String SettingsStore::otaPass()    { return prefs_.getString("ota_pass", ""); }
 bool   SettingsStore::hasOTAPass() { return otaPass().length() > 0; }
 
+// ── Orientation ──────────────────────────────────────────────────
+void   SettingsStore::setOrientation(const String& o) { prefs_.putString("orient", o); }
+String SettingsStore::orientation()      { return prefs_.getString("orient", ""); }
+bool   SettingsStore::hasOrientation()   { return orientation().length() > 0; }
+bool   SettingsStore::orientationHorizontal() {
+    // Any stored value other than "vertical" is treated as horizontal (the default).
+    return orientation() != "vertical";
+}
+
 // ── Snapshot cache ───────────────────────────────────────────────
 void SettingsStore::saveCache(const char* prov, const UsageSnapshot& s) {
     char key[16];

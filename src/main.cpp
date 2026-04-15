@@ -37,14 +37,18 @@ static volatile bool     dataReady = false;
 static WebServer*  portal_server = nullptr;
 static DNSServer*  portal_dns    = nullptr;
 
-// Display buffer
-static uint8_t lvBuf[SCREEN_W * 20 * sizeof(lv_color_t)];
+// Display buffer — sized for the larger dimension so it fits either orientation
+static uint8_t lvBuf[SCREEN_MAX_DIM * 20 * sizeof(lv_color_t)];
 
 // ── App state machine ────────────────────────────────────────────
 
-enum class State { SPLASH, PORTAL, CONNECTING, RUNNING };
+enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING };
 static State state = State::SPLASH;
 static uint32_t stateStart = 0;
+
+// Orientation chosen at boot (horizontal is the new default)
+static bool g_horizontal   = true;
+static bool g_needOrientPrompt = false;
 
 // ── LVGL display flush ──────────────────────────────────────────
 
@@ -323,22 +327,34 @@ void setup() {
     pinMode(PIN_TFT_BL, OUTPUT);
     digitalWrite(PIN_TFT_BL, HIGH);
 
-    // TFT
+    // NVS first — we need orientation preference before TFT/LVGL init
+    store.begin();
+
+    if (store.hasOrientation()) {
+        g_horizontal = store.orientationHorizontal();
+    } else {
+        g_horizontal       = true;   // default to horizontal on first boot
+        g_needOrientPrompt = true;   // ask user after splash
+    }
+    Serial.printf("Orientation: %s%s\n",
+        g_horizontal ? "horizontal" : "vertical",
+        g_needOrientPrompt ? " (first-boot default; will prompt)" : "");
+
+    // TFT — rotation 1 = landscape, rotation 0 = portrait
     tft.init();
-    tft.setRotation(0);
+    tft.setRotation(g_horizontal ? 1 : 0);
     tft.setSwapBytes(true);
     tft.fillScreen(TFT_BLACK);
 
-    // LVGL
+    // LVGL — size the display surface to match the active orientation
     lv_init();
     lv_tick_set_cb(lvTick);
-    lv_display_t* disp = lv_display_create(SCREEN_W, SCREEN_H);
+    uint16_t disp_w = g_horizontal ? SCREEN_W_H : SCREEN_W;
+    uint16_t disp_h = g_horizontal ? SCREEN_H_H : SCREEN_H;
+    lv_display_t* disp = lv_display_create(disp_w, disp_h);
     lv_display_set_flush_cb(disp, dispFlush);
     lv_display_set_buffers(disp, lvBuf, nullptr, sizeof(lvBuf),
                            LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-    // NVS
-    store.begin();
 
     // Encoder
     enc.begin();
@@ -366,8 +382,58 @@ void loop() {
         if (enc.wasLongPressed()) {
             Serial.println("Long-press detected — entering setup portal");
             store.clear();
+            g_needOrientPrompt = true;   // re-ask after factory reset
         }
         if (millis() - stateStart >= SPLASH_MS) {
+            if (g_needOrientPrompt) {
+                lv_obj_t* orient = UIManager::makeOrientationChoice();
+                lv_screen_load(orient);
+                state = State::ORIENTATION;
+                Serial.println("First boot / reset — prompting for orientation");
+            } else if (!store.hasWiFi()) {
+                portalSetup();
+                lv_obj_t* qr = UIManager::makeQRSetup();
+                lv_screen_load(qr);
+                state = State::PORTAL;
+                Serial.println("No WiFi configured — portal mode");
+            } else {
+                WiFi.mode(WIFI_STA);
+                WiFi.begin(store.ssid().c_str(), store.pass().c_str());
+                lv_obj_t* conn = UIManager::makeConnecting(store.ssid().c_str());
+                lv_screen_load(conn);
+                state = State::CONNECTING;
+                stateStart = millis();
+                Serial.printf("Connecting to %s...\n", store.ssid().c_str());
+            }
+        }
+        break;
+
+    // ── ORIENTATION CHOICE (first boot) ─────────────────────────
+    case State::ORIENTATION: {
+        // Turn encoder → toggle selection
+        int rot = enc.rotation();
+        if (rot != 0) {
+            bool cur = UIManager::orientationChoiceGetSel();
+            UIManager::orientationChoiceSetSel(!cur);
+        }
+        // Press encoder → commit
+        if (enc.wasPressed()) {
+            bool chosen = UIManager::orientationChoiceGetSel();
+            store.setOrientation(chosen ? "horizontal" : "vertical");
+            g_needOrientPrompt = false;
+            Serial.printf("Orientation saved: %s\n",
+                chosen ? "horizontal" : "vertical");
+
+            // If user picked a different orientation than the one currently
+            // applied to TFT/LVGL, we must reboot so the new rotation and
+            // display dimensions take effect cleanly.
+            if (chosen != g_horizontal) {
+                Serial.println("Orientation changed — rebooting...");
+                delay(500);
+                ESP.restart();
+            }
+
+            // Same orientation — proceed to the normal boot path
             if (!store.hasWiFi()) {
                 portalSetup();
                 lv_obj_t* qr = UIManager::makeQRSetup();
@@ -385,6 +451,7 @@ void loop() {
             }
         }
         break;
+    }
 
     // ── CAPTIVE PORTAL ───────────────────────────────────────────
     case State::PORTAL: {
@@ -423,7 +490,7 @@ void loop() {
             store.loadCache("openai", openaiSnap);
 
             // Init UI (builds mode ring from configured keys)
-            ui.init(store);
+            ui.init(store, g_horizontal);
             ui.updateData(claudeSnap, openaiSnap, store);
 
             // Start API refresh task on core 0
@@ -438,7 +505,7 @@ void loop() {
             Serial.println("WiFi timeout — using cached data");
             store.loadCache("claude", claudeSnap);
             store.loadCache("openai", openaiSnap);
-            ui.init(store);
+            ui.init(store, g_horizontal);
             ui.updateData(claudeSnap, openaiSnap, store);
             state = State::RUNNING;
         }

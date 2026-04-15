@@ -3,8 +3,8 @@
 #include "api/usage_provider.h"
 
 class SettingsStore;
-class ScreenProvider;
-class ScreenSettings;
+class IScreenProvider;
+class IScreenSettings;
 
 enum class Mode : uint8_t {
     CLAUDE_TODAY,
@@ -17,13 +17,17 @@ enum class Mode : uint8_t {
 };
 
 class UIManager {
-    // Screens (allocated on init; null if provider not configured)
-    ScreenProvider*  scr_claude_today_  = nullptr;
-    ScreenProvider*  scr_claude_month_  = nullptr;
-    ScreenProvider*  scr_openai_today_  = nullptr;
-    ScreenProvider*  scr_openai_month_  = nullptr;
-    ScreenProvider*  scr_combined_      = nullptr;
-    ScreenSettings*  scr_settings_      = nullptr;
+    // Screens (allocated on init; null if provider not configured).
+    // Concrete type depends on orientation picked at init(); we store
+    // pointers through the orientation-agnostic interface.
+    IScreenProvider* scr_claude_today_  = nullptr;
+    IScreenProvider* scr_claude_month_  = nullptr;
+    IScreenProvider* scr_openai_today_  = nullptr;
+    IScreenProvider* scr_openai_month_  = nullptr;
+    IScreenProvider* scr_combined_      = nullptr;
+    IScreenSettings* scr_settings_      = nullptr;
+
+    bool horizontal_ = true;
 
     // Active mode list (populated from available API keys)
     static constexpr int MAX_MODES = 6;
@@ -39,13 +43,10 @@ class UIManager {
 
     lv_obj_t* screenForMode(Mode m);
     void      transitionTo(int idx);
-    void      updateCurrentScreen(const UsageSnapshot& claude,
-                                  const UsageSnapshot& openai,
-                                  SettingsStore& store);
-    ScreenProvider* providerForMode(Mode m);
+    IScreenProvider* providerForMode(Mode m);
 
 public:
-    void init(SettingsStore& store);
+    void init(SettingsStore& store, bool horizontal);
     void nextMode();
     void adjustTimeframe(int delta);
     void onActivity();
@@ -55,11 +56,21 @@ public:
                     SettingsStore& store);
     void tick();                // call every loop — refreshes clock
 
-    // Boot screens (standalone, not in the mode ring)
+    // Boot screens (standalone, not in the mode ring).
+    // These use LV_ALIGN_CENTER / LV_ALIGN_BOTTOM_MID so they work
+    // in either orientation without additional parameters.
     static lv_obj_t* makeSplash();
     static lv_obj_t* makeQRSetup();
     static lv_obj_t* makeConnecting(const char* ssid);
     static lv_obj_t* makeSyncing();
 
+    // First-boot orientation choice screen.
+    // The caller drives it: turn encoder → orientationChoiceSetSel(!current),
+    // press encoder → read orientationChoiceGetSel() and save.
+    static lv_obj_t* makeOrientationChoice();
+    static void      orientationChoiceSetSel(bool horizontal);
+    static bool      orientationChoiceGetSel();
+
     Mode currentMode() const { return modes_[cur_idx_]; }
+    bool isHorizontal() const { return horizontal_; }
 };
