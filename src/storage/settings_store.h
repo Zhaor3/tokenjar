@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include "api/usage_provider.h"
+#include "api/claude_plan.h"
 
 class SettingsStore {
     Preferences prefs_;
@@ -21,6 +22,19 @@ public:
     String   openaiKey();
     bool     hasClaude();
     bool     hasOpenAI();
+
+    // Claude.ai session (sk-ant-sid01-...) — used to scrape subscription
+    // plan usage (session %, weekly %, extra-usage $) from claude.ai's
+    // undocumented endpoints. Completely separate from the Admin API key.
+    void     setClaudeSession(const String& k);
+    String   claudeSession();
+    bool     hasClaudeSession();
+
+    // Org UUID cache — fetched once on first successful plan request,
+    // then reused until the session key changes.
+    void     setClaudeOrgId(const String& uuid);
+    String   claudeOrgId();
+    void     clearClaudeOrgId();
 
     // Budgets
     void  setClaudeBudget(float daily, float monthly);
@@ -48,6 +62,10 @@ public:
     // Cached snapshots (survive reboot)
     void saveCache(const char* provider, const UsageSnapshot& s);
     bool loadCache(const char* provider, UsageSnapshot& s);
+
+    // Cached Claude plan snapshot (separate key — different shape)
+    void savePlanCache(const ClaudePlanSnapshot& s);
+    bool loadPlanCache(ClaudePlanSnapshot& s);
 
     // Factory reset
     void clear();

@@ -19,6 +19,23 @@ String SettingsStore::openaiKey()  { return prefs_.getString("openai_key", ""); 
 bool   SettingsStore::hasClaude()  { return claudeKey().length() > 0; }
 bool   SettingsStore::hasOpenAI()  { return openaiKey().length() > 0; }
 
+// ── Claude.ai session cookie (plan tracking) ─────────────────────
+// Separate from the Admin API key. When this is set, TokenJar scrapes
+// the claude.ai subscription usage page instead of the Admin API for
+// the "CLAUDE PLAN" screen.
+void   SettingsStore::setClaudeSession(const String& k) {
+    // Changing the session key invalidates the cached org id.
+    String prev = prefs_.getString("claude_sid", "");
+    if (prev != k) prefs_.remove("claude_org");
+    prefs_.putString("claude_sid", k);
+}
+String SettingsStore::claudeSession()    { return prefs_.getString("claude_sid", ""); }
+bool   SettingsStore::hasClaudeSession() { return claudeSession().length() > 0; }
+
+void   SettingsStore::setClaudeOrgId(const String& uuid) { prefs_.putString("claude_org", uuid); }
+String SettingsStore::claudeOrgId()    { return prefs_.getString("claude_org", ""); }
+void   SettingsStore::clearClaudeOrgId() { prefs_.remove("claude_org"); }
+
 // ── Budgets ──────────────────────────────────────────────────────
 void SettingsStore::setClaudeBudget(float d, float m) { prefs_.putFloat("claude_d_bud", d); prefs_.putFloat("claude_m_bud", m); }
 void SettingsStore::setOpenAIBudget(float d, float m) { prefs_.putFloat("openai_d_bud", d); prefs_.putFloat("openai_m_bud", m); }
@@ -56,6 +73,15 @@ bool SettingsStore::loadCache(const char* prov, UsageSnapshot& s) {
     char key[16];
     snprintf(key, sizeof(key), "%.10s_c", prov);
     return prefs_.getBytes(key, &s, sizeof(s)) == sizeof(s);
+}
+
+// Claude plan snapshot — separate key, different shape than UsageSnapshot.
+void SettingsStore::savePlanCache(const ClaudePlanSnapshot& s) {
+    prefs_.putBytes("plan_c", &s, sizeof(s));
+}
+
+bool SettingsStore::loadPlanCache(ClaudePlanSnapshot& s) {
+    return prefs_.getBytes("plan_c", &s, sizeof(s)) == sizeof(s);
 }
 
 void SettingsStore::clear() { prefs_.clear(); }

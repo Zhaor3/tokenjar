@@ -13,7 +13,9 @@
 #include "theme.h"
 #include "storage/settings_store.h"
 #include "api/usage_provider.h"
+#include "api/claude_plan.h"
 #include "api/claude_client.h"
+#include "api/claude_web_client.h"
 #include "api/openai_client.h"
 #include "input/encoder.h"
 #include "ui/ui_manager.h"
@@ -25,13 +27,22 @@ static SettingsStore    store;
 static Encoder          enc;
 static ClaudeUsageClient claudeApi;
 static OpenAIUsageClient openaiApi;
+static ClaudeWebClient   claudeWebApi;
 static UIManager        ui;
 
 // Shared data between main loop and API task
 static SemaphoreHandle_t dataMtx;
 static UsageSnapshot     claudeSnap, openaiSnap;
+static ClaudePlanSnapshot planSnap;
 static TaskHandle_t      apiTask = nullptr;
 static volatile bool     dataReady = false;
+static volatile bool     planReady = false;
+
+// Claude.ai endpoint has its own (slower) refresh cadence — 5 minutes.
+// The API task wakes every API_REFRESH_MS (60s) but only hits claude.ai
+// if enough time has elapsed since the last plan fetch.
+static constexpr uint32_t PLAN_REFRESH_MS = 5UL * 60UL * 1000UL;
+static uint32_t last_plan_fetch_ms = 0;
 
 // Portal mode
 static WebServer*  portal_server = nullptr;
@@ -70,6 +81,7 @@ static void apiRefreshLoop(void*) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(API_REFRESH_MS));
 
+        // ── Admin API fetches (every wake-up, ~60s) ──────────────
         UsageSnapshot c = {}, o = {};
 
         String ck = store.claudeKey();
@@ -85,6 +97,45 @@ static void apiRefreshLoop(void*) {
             if (o.valid) { openaiSnap = o; store.saveCache("openai", o); }
             dataReady = true;
             xSemaphoreGive(dataMtx);
+        }
+
+        // ── Claude.ai subscription plan (rate-limited to 5 min) ──
+        String sid = store.claudeSession();
+        uint32_t now_ms = millis();
+        bool first_fetch = (last_plan_fetch_ms == 0);
+        bool interval_due = (now_ms - last_plan_fetch_ms) >= PLAN_REFRESH_MS;
+
+        if (sid.length() > 0 && (first_fetch || interval_due)) {
+            last_plan_fetch_ms = now_ms;
+
+            // Work against a local copy so a failed fetch doesn't wipe
+            // cached values in planSnap.
+            ClaudePlanSnapshot p;
+            if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+                p = planSnap;
+                xSemaphoreGive(dataMtx);
+            } else {
+                memset(&p, 0, sizeof(p));
+            }
+
+            String orgId = store.claudeOrgId();
+            String newOrgId = orgId;
+            claudeWebApi.fetch(sid.c_str(), orgId.c_str(), p, newOrgId);
+
+            // Persist any newly discovered org UUID.
+            if (newOrgId.length() > 0 && newOrgId != orgId) {
+                store.setClaudeOrgId(newOrgId);
+            } else if (newOrgId.length() == 0 && orgId.length() > 0) {
+                // fetch() clears newOrgId on auth failure — force rediscovery
+                store.clearClaudeOrgId();
+            }
+
+            if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+                planSnap = p;
+                if (p.valid) store.savePlanCache(p);
+                planReady = true;
+                xSemaphoreGive(dataMtx);
+            }
         }
     }
 }
@@ -128,6 +179,8 @@ hr{border:0;border-top:1px solid #1a1a1a;margin:20px 0}
   <div><label>DAILY BUDGET ($)</label><input type="number" id="cbd" value="5" step="0.5"></div>
   <div><label>MONTHLY BUDGET ($)</label><input type="number" id="cbm" value="100" step="1"></div>
 </div>
+<label>CLAUDE.AI SESSION COOKIE (optional - Pro/Max plan tracking)</label>
+<input type="text" id="csid" placeholder="sk-ant-sid01-...">
 <hr>
 <label>OPENAI ADMIN API KEY <a href="https://platform.openai.com/settings/organization/admin-keys" target="_blank">(how to get this)</a></label>
 <input type="text" id="okey" placeholder="sk-admin-...">
@@ -176,6 +229,7 @@ function saveConfig(){
   fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({ssid:document.getElementById('wssid').value,pass:document.getElementById('wpass').value,
       ckey:document.getElementById('ckey').value,
+      csid:document.getElementById('csid').value,
       okey:document.getElementById('okey').value,
       cbd:parseFloat(document.getElementById('cbd').value),
       cbm:parseFloat(document.getElementById('cbm').value),
@@ -281,6 +335,12 @@ static void portalSetup() {
 
         String ck = doc["ckey"] | "";
         if (ck.length() > 0) store.setClaudeKey(ck);
+
+        // Optional Claude.ai session cookie (for Pro/Max plan scraping).
+        // setClaudeSession() internally invalidates the cached org UUID
+        // whenever the session value actually changes.
+        String csid = doc["csid"] | "";
+        if (csid.length() > 0) store.setClaudeSession(csid);
 
         String ok = doc["okey"] | "";
         if (ok.length() > 0) store.setOpenAIKey(ok);
@@ -488,10 +548,12 @@ void loop() {
             // Load cached snapshots
             store.loadCache("claude", claudeSnap);
             store.loadCache("openai", openaiSnap);
+            store.loadPlanCache(planSnap);
 
             // Init UI (builds mode ring from configured keys)
             ui.init(store, g_horizontal);
             ui.updateData(claudeSnap, openaiSnap, store);
+            ui.updatePlan(planSnap);
 
             // Start API refresh task on core 0
             dataMtx = xSemaphoreCreateMutex();
@@ -505,8 +567,10 @@ void loop() {
             Serial.println("WiFi timeout — using cached data");
             store.loadCache("claude", claudeSnap);
             store.loadCache("openai", openaiSnap);
+            store.loadPlanCache(planSnap);
             ui.init(store, g_horizontal);
             ui.updateData(claudeSnap, openaiSnap, store);
+            ui.updatePlan(planSnap);
             state = State::RUNNING;
         }
         break;
@@ -538,6 +602,15 @@ void loop() {
             if (xSemaphoreTake(dataMtx, 0) == pdTRUE) {
                 dataReady = false;
                 ui.updateData(claudeSnap, openaiSnap, store);
+                xSemaphoreGive(dataMtx);
+            }
+        }
+
+        // Consume new Claude.ai plan data (rate-limited, 5-minute cadence)
+        if (planReady) {
+            if (xSemaphoreTake(dataMtx, 0) == pdTRUE) {
+                planReady = false;
+                ui.updatePlan(planSnap);
                 xSemaphoreGive(dataMtx);
             }
         }

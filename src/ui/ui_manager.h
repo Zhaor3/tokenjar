@@ -1,14 +1,17 @@
 #pragma once
 #include <lvgl.h>
 #include "api/usage_provider.h"
+#include "api/claude_plan.h"
 
 class SettingsStore;
 class IScreenProvider;
 class IScreenSettings;
+class IScreenPlan;
 
 enum class Mode : uint8_t {
     CLAUDE_TODAY,
     CLAUDE_MONTH,
+    CLAUDE_PLAN,      // Pro/Max subscription usage (requires session key)
     OPENAI_TODAY,
     OPENAI_MONTH,
     COMBINED,
@@ -22,6 +25,7 @@ class UIManager {
     // pointers through the orientation-agnostic interface.
     IScreenProvider* scr_claude_today_  = nullptr;
     IScreenProvider* scr_claude_month_  = nullptr;
+    IScreenPlan*     scr_claude_plan_   = nullptr;
     IScreenProvider* scr_openai_today_  = nullptr;
     IScreenProvider* scr_openai_month_  = nullptr;
     IScreenProvider* scr_combined_      = nullptr;
@@ -30,7 +34,7 @@ class UIManager {
     bool horizontal_ = true;
 
     // Active mode list (populated from available API keys)
-    static constexpr int MAX_MODES = 6;
+    static constexpr int MAX_MODES = 7;
     Mode     modes_[MAX_MODES];
     int      num_modes_  = 0;
     int      cur_idx_    = 0;
@@ -54,6 +58,7 @@ public:
     void updateData(const UsageSnapshot& claude,
                     const UsageSnapshot& openai,
                     SettingsStore& store);
+    void updatePlan(const ClaudePlanSnapshot& plan);
     void tick();                // call every loop — refreshes clock
 
     // Boot screens (standalone, not in the mode ring).
