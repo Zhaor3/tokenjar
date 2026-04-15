@@ -27,15 +27,21 @@ public:
     // via the (non-owning) `outOrgId` buffer. On success, fills `out`
     // with plan usage data.
     //
+    // If the server sends back a renewed session cookie via Set-Cookie,
+    // `outNewSessionKey` is populated so the caller can persist it.
+    //
     // Returns true if `out.valid` was set true (i.e. /usage succeeded).
     // Overage endpoint failure does NOT flip valid to false — it just
     // leaves `extra_enabled` as false.
     bool fetch(const char* sessionKey,
                const char* cachedOrgId,
                ClaudePlanSnapshot& out,
-               String& outOrgId);
+               String& outOrgId,
+               String& outNewSessionKey);
 
 private:
+    String renewedSession_;   // set by getWithCookie if Set-Cookie seen
+
     // Steps 1–3 of the scrape flow.
     bool fetchOrgId(const char* sessionKey, String& outOrgId, uint8_t& errOut);
     bool fetchUsage(const char* sessionKey,

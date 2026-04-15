@@ -120,7 +120,8 @@ static void apiRefreshLoop(void*) {
 
             String orgId = store.claudeOrgId();
             String newOrgId = orgId;
-            claudeWebApi.fetch(sid.c_str(), orgId.c_str(), p, newOrgId);
+            String newSessionKey;
+            claudeWebApi.fetch(sid.c_str(), orgId.c_str(), p, newOrgId, newSessionKey);
 
             // Persist any newly discovered org UUID.
             if (newOrgId.length() > 0 && newOrgId != orgId) {
@@ -128,6 +129,12 @@ static void apiRefreshLoop(void*) {
             } else if (newOrgId.length() == 0 && orgId.length() > 0) {
                 // fetch() clears newOrgId on auth failure — force rediscovery
                 store.clearClaudeOrgId();
+            }
+
+            // Auto-renew session cookie if the server sent a fresh one.
+            if (newSessionKey.length() > 0 && newSessionKey != sid) {
+                store.setClaudeSession(newSessionKey);
+                Serial.println("[PLAN] Session cookie auto-renewed in NVS");
             }
 
             if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
@@ -582,12 +589,16 @@ void loop() {
             ui.nextMode();
             ui.onActivity();
         }
-        // Encoder: long press (3s hold) → re-enter setup portal
+        // Encoder: long press → force-refresh data for the current screen.
+        // (To re-enter setup portal, long-press during the splash screen.)
         if (enc.wasLongPressed()) {
-            Serial.println("Long-press — rebooting into setup portal...");
-            store.clear();
-            delay(200);
-            ESP.restart();
+            Mode m = ui.currentMode();
+            Serial.printf("Long-press — force refresh (mode %d)\n", (int)m);
+            if (m == Mode::CLAUDE_PLAN) {
+                last_plan_fetch_ms = 0;   // bypass 5-min gate
+            }
+            if (apiTask) xTaskNotifyGive(apiTask);   // wake API task now
+            ui.onActivity();
         }
         // Encoder: rotation → timeframe
         int rot = enc.rotation();

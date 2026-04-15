@@ -5,36 +5,28 @@
 
 class SettingsStore;
 class IScreenProvider;
-class IScreenSettings;
 class IScreenPlan;
 
+// Provider-level modes.  Button press cycles through these.
+// Timeframe (Today / 30 Days / etc.) is controlled by encoder rotation
+// within the CLAUDE and OPENAI modes — no separate day/month screens.
 enum class Mode : uint8_t {
-    CLAUDE_TODAY,
-    CLAUDE_MONTH,
-    CLAUDE_PLAN,      // Pro/Max subscription usage (requires session key)
-    OPENAI_TODAY,
-    OPENAI_MONTH,
-    COMBINED,
-    SETTINGS,
+    CLAUDE,           // Admin API spend (timeframe via rotation)
+    CLAUDE_PLAN,      // Pro/Max subscription usage (session key)
+    OPENAI,           // Admin API spend (timeframe via rotation)
     _COUNT
 };
 
 class UIManager {
-    // Screens (allocated on init; null if provider not configured).
-    // Concrete type depends on orientation picked at init(); we store
-    // pointers through the orientation-agnostic interface.
-    IScreenProvider* scr_claude_today_  = nullptr;
-    IScreenProvider* scr_claude_month_  = nullptr;
-    IScreenPlan*     scr_claude_plan_   = nullptr;
-    IScreenProvider* scr_openai_today_  = nullptr;
-    IScreenProvider* scr_openai_month_  = nullptr;
-    IScreenProvider* scr_combined_      = nullptr;
-    IScreenSettings* scr_settings_      = nullptr;
+    // One screen per provider (null if not configured).
+    IScreenProvider* scr_claude_      = nullptr;
+    IScreenPlan*     scr_claude_plan_ = nullptr;
+    IScreenProvider* scr_openai_      = nullptr;
 
     bool horizontal_ = true;
 
     // Active mode list (populated from available API keys)
-    static constexpr int MAX_MODES = 7;
+    static constexpr int MAX_MODES = 3;
     Mode     modes_[MAX_MODES];
     int      num_modes_  = 0;
     int      cur_idx_    = 0;
@@ -62,16 +54,12 @@ public:
     void tick();                // call every loop — refreshes clock
 
     // Boot screens (standalone, not in the mode ring).
-    // These use LV_ALIGN_CENTER / LV_ALIGN_BOTTOM_MID so they work
-    // in either orientation without additional parameters.
     static lv_obj_t* makeSplash();
     static lv_obj_t* makeQRSetup();
     static lv_obj_t* makeConnecting(const char* ssid);
     static lv_obj_t* makeSyncing();
 
     // First-boot orientation choice screen.
-    // The caller drives it: turn encoder → orientationChoiceSetSel(!current),
-    // press encoder → read orientationChoiceGetSel() and save.
     static lv_obj_t* makeOrientationChoice();
     static void      orientationChoiceSetSel(bool horizontal);
     static bool      orientationChoiceGetSel();

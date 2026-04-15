@@ -104,12 +104,33 @@ int ClaudeWebClient::getWithCookie(const char* url,
 
     http.setTimeout(15000);
 
+    // Collect Set-Cookie so we can auto-renew the session cookie.
+    const char* hdrKeys[] = {"Set-Cookie"};
+    http.collectHeaders(hdrKeys, 1);
+
     int code = http.GET();
     body = http.getString();  // Always try to read — body is useful even on errors
     Serial.printf("[PLAN] HTTP %d, %d bytes\n", code, body.length());
     if (code >= 400) {
         Serial.printf("[PLAN] Error body: %.200s\n", body.c_str());
     }
+
+    // Check for renewed session cookie in response headers.
+    if (http.hasHeader("Set-Cookie")) {
+        String sc = http.header("Set-Cookie");
+        int idx = sc.indexOf("sessionKey=");
+        if (idx >= 0) {
+            int start = idx + 11;   // strlen("sessionKey=")
+            int end   = sc.indexOf(';', start);
+            if (end < 0) end = sc.length();
+            String key = sc.substring(start, end);
+            if (key.length() > 20) {   // sanity — real keys are long
+                renewedSession_ = key;
+                Serial.println("[PLAN] Session cookie renewed via Set-Cookie");
+            }
+        }
+    }
+
     http.end();
     return code;
 }
@@ -276,12 +297,14 @@ bool ClaudeWebClient::fetchOverage(const char* sessionKey,
 bool ClaudeWebClient::fetch(const char* sessionKey,
                             const char* cachedOrgId,
                             ClaudePlanSnapshot& out,
-                            String& outOrgId)
+                            String& outOrgId,
+                            String& outNewSessionKey)
 {
     // We DON'T memset out at the start — on failure we want to preserve
     // the caller's cached values (so the screen keeps showing stale data
     // instead of going blank). We only touch fields we successfully read.
     out.error = CLAUDE_PLAN_OK;
+    renewedSession_ = "";   // clear before this fetch cycle
 
     // Step 1 — get (or reuse) the org UUID.
     String orgId = cachedOrgId ? String(cachedOrgId) : String();
@@ -313,5 +336,11 @@ bool ClaudeWebClient::fetch(const char* sessionKey,
 
     out.valid        = true;
     out.last_updated = time(nullptr);
+
+    // Propagate any renewed session cookie from Set-Cookie headers.
+    if (renewedSession_.length() > 0) {
+        outNewSessionKey = renewedSession_;
+        renewedSession_  = "";
+    }
     return true;
 }

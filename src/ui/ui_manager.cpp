@@ -1,8 +1,6 @@
 #include "ui/ui_manager.h"
 #include "ui/screen_provider.h"
 #include "ui/screen_provider_h.h"
-#include "ui/screen_settings.h"
-#include "ui/screen_settings_h.h"
 #include "ui/screen_plan.h"
 #include "ui/screen_plan_h.h"
 #include "ui/i_screen_plan.h"
@@ -16,7 +14,6 @@ using namespace Theme;
 
 // ── Initialization ───────────────────────────────────────────────
 
-// Construct a provider screen in the appropriate orientation.
 static IScreenProvider* makeProviderScreen(bool horizontal, const char* name, lv_color_t accent) {
     if (horizontal) return new ScreenProviderH(name, accent);
     return new ScreenProvider(name, accent);
@@ -34,31 +31,20 @@ void UIManager::init(SettingsStore& store, bool horizontal) {
     bool has_plan = store.hasClaudeSession();
     num_modes_ = 0;
 
+    // One screen per provider. Timeframe is controlled by rotation,
+    // not by having separate Today / Month screens.
     if (has_c) {
-        scr_claude_today_ = makeProviderScreen(horizontal, "CLAUDE", Color::claude());
-        scr_claude_month_ = makeProviderScreen(horizontal, "CLAUDE", Color::claude());
-        modes_[num_modes_++] = Mode::CLAUDE_TODAY;
-        modes_[num_modes_++] = Mode::CLAUDE_MONTH;
+        scr_claude_ = makeProviderScreen(horizontal, "CLAUDE", Color::claude());
+        modes_[num_modes_++] = Mode::CLAUDE;
     }
     if (has_plan) {
         scr_claude_plan_ = makePlanScreen(horizontal);
         modes_[num_modes_++] = Mode::CLAUDE_PLAN;
     }
     if (has_o) {
-        scr_openai_today_ = makeProviderScreen(horizontal, "OPENAI", Color::openai());
-        scr_openai_month_ = makeProviderScreen(horizontal, "OPENAI", Color::openai());
-        modes_[num_modes_++] = Mode::OPENAI_TODAY;
-        modes_[num_modes_++] = Mode::OPENAI_MONTH;
+        scr_openai_ = makeProviderScreen(horizontal, "OPENAI", Color::openai());
+        modes_[num_modes_++] = Mode::OPENAI;
     }
-    if (has_c && has_o) {
-        scr_combined_ = makeProviderScreen(horizontal, "COMBINED", Color::combined());
-        modes_[num_modes_++] = Mode::COMBINED;
-    }
-
-    scr_settings_ = horizontal
-        ? static_cast<IScreenSettings*>(new ScreenSettingsH())
-        : static_cast<IScreenSettings*>(new ScreenSettings());
-    modes_[num_modes_++] = Mode::SETTINGS;
 
     cur_idx_   = 0;
     bl_target_ = BL_FULL;
@@ -76,25 +62,18 @@ void UIManager::init(SettingsStore& store, bool horizontal) {
 
 lv_obj_t* UIManager::screenForMode(Mode m) {
     switch (m) {
-        case Mode::CLAUDE_TODAY: return scr_claude_today_ ? scr_claude_today_->screen() : nullptr;
-        case Mode::CLAUDE_MONTH: return scr_claude_month_ ? scr_claude_month_->screen() : nullptr;
-        case Mode::CLAUDE_PLAN:  return scr_claude_plan_  ? scr_claude_plan_->screen()  : nullptr;
-        case Mode::OPENAI_TODAY: return scr_openai_today_ ? scr_openai_today_->screen() : nullptr;
-        case Mode::OPENAI_MONTH: return scr_openai_month_ ? scr_openai_month_->screen() : nullptr;
-        case Mode::COMBINED:     return scr_combined_     ? scr_combined_->screen()     : nullptr;
-        case Mode::SETTINGS:     return scr_settings_     ? scr_settings_->screen()     : nullptr;
+        case Mode::CLAUDE:      return scr_claude_      ? scr_claude_->screen()      : nullptr;
+        case Mode::CLAUDE_PLAN: return scr_claude_plan_ ? scr_claude_plan_->screen() : nullptr;
+        case Mode::OPENAI:      return scr_openai_      ? scr_openai_->screen()      : nullptr;
         default: return nullptr;
     }
 }
 
 IScreenProvider* UIManager::providerForMode(Mode m) {
     switch (m) {
-        case Mode::CLAUDE_TODAY: return scr_claude_today_;
-        case Mode::CLAUDE_MONTH: return scr_claude_month_;
-        case Mode::OPENAI_TODAY: return scr_openai_today_;
-        case Mode::OPENAI_MONTH: return scr_openai_month_;
-        case Mode::COMBINED:     return scr_combined_;
-        // CLAUDE_PLAN is not an IScreenProvider — returns null so flashHero() is a no-op
+        case Mode::CLAUDE:  return scr_claude_;
+        case Mode::OPENAI:  return scr_openai_;
+        // CLAUDE_PLAN is not an IScreenProvider — returns null
         default: return nullptr;
     }
 }
@@ -134,38 +113,10 @@ void UIManager::updateData(const UsageSnapshot& claude,
     float cd = store.claudeDaily(),   cm = store.claudeMonthly();
     float od = store.openaiDaily(),   om = store.openaiMonthly();
 
-    auto tfToday = timeframe_;
-    auto tfMonth = timeframe_;
-
-    if (scr_claude_today_)
-        scr_claude_today_->update(claude, cd, cm, tfToday);
-    if (scr_claude_month_) {
-        // Month screen always shows D30
-        UsageSnapshot monthSnap = claude;
-        scr_claude_month_->update(monthSnap, cd, cm, Timeframe::D30);
-    }
-    if (scr_openai_today_)
-        scr_openai_today_->update(openai, od, om, tfToday);
-    if (scr_openai_month_) {
-        UsageSnapshot monthSnap = openai;
-        scr_openai_month_->update(monthSnap, od, om, Timeframe::D30);
-    }
-    if (scr_combined_) {
-        UsageSnapshot combined;
-        memset(&combined, 0, sizeof(combined));
-        combined.spend_today  = claude.spend_today  + openai.spend_today;
-        combined.spend_month  = claude.spend_month  + openai.spend_month;
-        combined.tokens_today = claude.tokens_today + openai.tokens_today;
-        combined.tokens_month = claude.tokens_month + openai.tokens_month;
-        for (int i = 0; i < SPARK_POINTS; i++)
-            combined.hourly_spend[i] = claude.hourly_spend[i] + openai.hourly_spend[i];
-        combined.last_updated = (claude.last_updated < openai.last_updated)
-                                ? claude.last_updated : openai.last_updated;
-        combined.valid = claude.valid && openai.valid;
-        scr_combined_->update(combined, cd + od, cm + om, tfToday);
-    }
-
-    if (scr_settings_) scr_settings_->update(store);
+    if (scr_claude_)
+        scr_claude_->update(claude, cd, cm, timeframe_);
+    if (scr_openai_)
+        scr_openai_->update(openai, od, om, timeframe_);
 }
 
 // ── Plan data push (independent 5-min cadence) ───────────────────
@@ -182,13 +133,9 @@ void UIManager::tick() {
     if (now - last_clock < 10000) return;  // every 10 s
     last_clock = now;
 
-    if (scr_claude_today_)  scr_claude_today_->refreshClock();
-    if (scr_claude_month_)  scr_claude_month_->refreshClock();
-    if (scr_claude_plan_)   scr_claude_plan_->refreshClock();
-    if (scr_openai_today_)  scr_openai_today_->refreshClock();
-    if (scr_openai_month_)  scr_openai_month_->refreshClock();
-    if (scr_combined_)      scr_combined_->refreshClock();
-    if (scr_settings_)      scr_settings_->refreshClock();
+    if (scr_claude_)      scr_claude_->refreshClock();
+    if (scr_claude_plan_) scr_claude_plan_->refreshClock();
+    if (scr_openai_)      scr_openai_->refreshClock();
 }
 
 // ── Backlight / idle ─────────────────────────────────────────────
