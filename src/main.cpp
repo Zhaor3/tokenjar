@@ -388,7 +388,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
 
-    Serial.println("\n=== TOKENJAR v1.0 ===");
+    Serial.println("\n=== TOKENJAR v2.0 ===");
 
     // Backlight — simple digital on (PWM can be added later)
     pinMode(PIN_TFT_BL, OUTPUT);
