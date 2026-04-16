@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TokenJar Screen Mockups</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a1a; display: flex; flex-wrap: wrap; gap: 32px; padding: 32px; justify-content: center; font-family: 'Montserrat', sans-serif; }
+
+  .screen {
+    width: 320px;
+    height: 240px;
+    background: #000;
+    position: relative;
+    overflow: hidden;
+    border-radius: 4px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+  }
+  .screen-label {
+    color: #6b6660;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-align: center;
+    margin-bottom: 8px;
+    font-family: 'Montserrat', sans-serif;
+  }
+  .screen-wrap { display: flex; flex-direction: column; align-items: center; }
+
+  /* Common text styles matching theme.h */
+  .text    { color: #f5f1ea; }
+  .dim     { color: #6b6660; }
+  .vdim    { color: #3d3a37; }
+  .claude  { color: #d97757; }
+  .openai  { color: #10a37f; }
+
+  .label-font { font-size: 12px; font-weight: 500; letter-spacing: 2px; }
+  .small-font { font-size: 10px; font-weight: 400; }
+  .body-font  { font-size: 14px; font-weight: 600; }
+  .hero-font  { font-size: 48px; font-weight: 700; letter-spacing: -1px; }
+
+  /* Status dot */
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #4ade80;
+    position: absolute;
+  }
+
+  /* Progress bar */
+  .bar {
+    height: 4px;
+    background: #1a1a1a;
+    position: absolute;
+  }
+  .bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-dark));
+  }
+  .bar-fill-claude { --accent: #d97757; --accent-dark: #b55e3f; }
+  .bar-fill-openai { --accent: #10a37f; --accent-dark: #0b7a5e; }
+
+  /* Hairline divider */
+  .divider {
+    position: absolute;
+    left: 16px; right: 16px;
+    height: 1px;
+    background: #1a1a1a;
+  }
+
+  /* Sparkline SVG */
+  .sparkline {
+    position: absolute;
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 1: Claude Admin API                                     -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="screen-label">CLAUDE - ADMIN API</div>
+  <div class="screen" id="s-claude">
+    <!-- Header -->
+    <div style="position:absolute; left:16px; top:12px;" class="dim label-font">CLAUDE</div>
+    <div class="dot" style="top:15px; left:260px; background:#4ade80;"></div>
+    <div style="position:absolute; right:16px; top:12px;" class="dim label-font" style="letter-spacing:0">14:32</div>
+
+    <!-- Timeframe -->
+    <div style="position:absolute; left:16px; top:32px;" class="dim label-font">TODAY</div>
+
+    <!-- Hero spend -->
+    <div style="position:absolute; left:16px; top:52px;" class="text hero-font">$12.47</div>
+
+    <!-- Sparkline -->
+    <svg class="sparkline" style="left:184px; top:68px;" width="124" height="44" viewBox="0 0 124 44">
+      <polyline fill="none" stroke="#d97757" stroke-width="1.5"
+        points="0,38 5,36 10,34 16,30 21,32 26,28 31,22 37,25 42,20 47,24 52,18 58,15 63,20 68,12 73,16 79,10 84,14 89,8 94,12 100,6 105,10 110,4 116,8 124,2"/>
+    </svg>
+
+    <!-- Divider -->
+    <div class="divider" style="top:128px;"></div>
+
+    <!-- Budget -->
+    <div style="position:absolute; left:16px; top:140px;" class="dim label-font">42% OF $30 DAILY</div>
+    <div class="bar" style="left:16px; top:158px; width:288px;">
+      <div class="bar-fill bar-fill-claude" style="width:42%;"></div>
+    </div>
+
+    <!-- Tokens -->
+    <div style="position:absolute; left:16px; top:176px;" class="dim label-font">234.5K TOKENS</div>
+
+    <!-- Footer -->
+    <div style="position:absolute; left:16px; top:206px;" class="vdim small-font">UPDATED 2M AGO</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 2: Claude Plan                                          -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="screen-label">CLAUDE - SUBSCRIPTION PLAN</div>
+  <div class="screen" id="s-plan">
+    <!-- Header -->
+    <div style="position:absolute; left:16px; top:12px;" class="dim label-font">CLAUDE PLAN</div>
+    <div class="dot" style="top:15px; left:260px; background:#4ade80;"></div>
+    <div style="position:absolute; right:16px; top:12px;" class="dim label-font">14:32</div>
+
+    <!-- Subtitle -->
+    <div style="position:absolute; left:16px; top:32px;" class="dim label-font">SUBSCRIPTION</div>
+
+    <!-- Left column: Session -->
+    <div style="position:absolute; left:16px; top:54px;" class="dim label-font">SESSION 5H</div>
+    <div style="position:absolute; left:16px; top:68px;" class="text hero-font">42%</div>
+    <div class="bar" style="left:16px; top:124px; width:142px;">
+      <div class="bar-fill bar-fill-claude" style="width:42%;"></div>
+    </div>
+    <div style="position:absolute; left:16px; top:134px;" class="vdim small-font">RESETS 19:32</div>
+
+    <!-- Right column: Weekly -->
+    <div style="position:absolute; left:176px; top:54px;" class="dim label-font">WEEKLY LIMIT</div>
+    <div style="position:absolute; left:176px; top:70px;" class="text body-font">19%</div>
+    <div class="bar" style="left:176px; top:92px; width:124px;">
+      <div class="bar-fill bar-fill-claude" style="width:19%;"></div>
+    </div>
+    <div style="position:absolute; left:176px; top:100px;" class="vdim small-font">OPUS 5%  SONNET 18%</div>
+    <div style="position:absolute; left:176px; top:112px;" class="vdim small-font">RESETS APR 21</div>
+
+    <!-- Divider -->
+    <div class="divider" style="top:150px;"></div>
+
+    <!-- Extra usage -->
+    <div style="position:absolute; left:16px; top:162px;" class="dim label-font">EXTRA USAGE</div>
+    <div style="position:absolute; left:126px; top:165px;" class="text small-font">$12.50 / $50</div>
+    <div class="bar" style="left:16px; top:180px; width:288px;">
+      <div class="bar-fill bar-fill-claude" style="width:25%;"></div>
+    </div>
+
+    <!-- Footer -->
+    <div style="position:absolute; left:16px; top:210px;" class="vdim small-font">UPDATED 3M AGO</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 3: OpenAI Admin API                                     -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="screen-label">OPENAI - ADMIN API</div>
+  <div class="screen" id="s-openai">
+    <!-- Header -->
+    <div style="position:absolute; left:16px; top:12px;" class="dim label-font">OPENAI</div>
+    <div class="dot" style="top:15px; left:260px; background:#4ade80;"></div>
+    <div style="position:absolute; right:16px; top:12px;" class="dim label-font">14:32</div>
+
+    <!-- Timeframe -->
+    <div style="position:absolute; left:16px; top:32px;" class="dim label-font">TODAY</div>
+
+    <!-- Hero spend -->
+    <div style="position:absolute; left:16px; top:52px;" class="text hero-font">$8.23</div>
+
+    <!-- Sparkline -->
+    <svg class="sparkline" style="left:184px; top:68px;" width="124" height="44" viewBox="0 0 124 44">
+      <polyline fill="none" stroke="#10a37f" stroke-width="1.5"
+        points="0,40 5,38 10,35 16,38 21,30 26,32 31,28 37,30 42,22 47,25 52,20 58,22 63,15 68,18 73,12 79,10 84,15 89,8 94,14 100,10 105,6 110,12 116,5 124,8"/>
+    </svg>
+
+    <!-- Divider -->
+    <div class="divider" style="top:128px;"></div>
+
+    <!-- Budget -->
+    <div style="position:absolute; left:16px; top:140px;" class="dim label-font">27% OF $30 DAILY</div>
+    <div class="bar" style="left:16px; top:158px; width:288px;">
+      <div class="bar-fill bar-fill-openai" style="width:27%;"></div>
+    </div>
+
+    <!-- Tokens -->
+    <div style="position:absolute; left:16px; top:176px;" class="dim label-font">1.02M TOKENS</div>
+
+    <!-- Footer -->
+    <div style="position:absolute; left:16px; top:206px;" class="vdim small-font">UPDATED JUST NOW</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<!-- SCREEN 4: Setup Portal                                         -->
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<div class="screen-wrap">
+  <div class="screen-label">SETUP PORTAL (BROWSER)</div>
+  <div class="screen" id="s-portal" style="width:320px; height:480px; padding:20px; overflow-y:auto;">
+    <div style="font-size:13px; letter-spacing:4px; color:#d97757; margin-bottom:20px; font-weight:700;">TOKENJAR</div>
+
+    <div style="font-size:10px; letter-spacing:2px; color:#6b6660; margin:14px 0 4px;">WIFI NETWORK</div>
+    <div style="width:100%; padding:8px; background:#111; border:1px solid #1a1a1a; color:#f5f1ea; font-size:12px; font-family:'Montserrat',sans-serif;">MyHomeWiFi</div>
+
+    <div style="font-size:10px; letter-spacing:2px; color:#6b6660; margin:14px 0 4px;">WIFI PASSWORD</div>
+    <div style="width:100%; padding:8px; background:#111; border:1px solid #1a1a1a; color:#6b6660; font-size:12px;">********</div>
+
+    <div style="border-top:1px solid #1a1a1a; margin:16px 0;"></div>
+
+    <div style="font-size:10px; letter-spacing:2px; color:#6b6660; margin:14px 0 4px;">ANTHROPIC ADMIN API KEY</div>
+    <div style="width:100%; padding:8px; background:#111; border:1px solid #1a1a1a; color:#f5f1ea; font-size:11px; word-break:break-all;">sk-ant-admin01-xxxx...xxxx</div>
+
+    <div style="display:flex; gap:10px; margin-top:8px;">
+      <div style="flex:1;">
+        <div style="font-size:10px; letter-spacing:2px; color:#6b6660; margin:6px 0 4px;">DAILY ($)</div>
+        <div style="width:100%; padding:8px; background:#111; border:1px solid #1a1a1a; color:#f5f1ea; font-size:12px;">30</div>
+      </div>
+      <div style="flex:1;">
+        <div style="font-size:10px; letter-spacing:2px; color:#6b6660; margin:6px 0 4px;">MONTHLY ($)</div>
+        <div style="width:100%; padding:8px; background:#111; border:1px solid #1a1a1a; color:#f5f1ea; font-size:12px;">500</div>
+      </div>
+    </div>
+
+    <div style="font-size:10px; letter-spacing:2px; color:#6b6660; margin:14px 0 4px;">CLAUDE.AI SESSION COOKIE</div>
+    <div style="width:100%; padding:8px; background:#111; border:1px solid #1a1a1a; color:#6b6660; font-size:11px;">sk-ant-sid01-...</div>
+
+    <div style="border-top:1px solid #1a1a1a; margin:16px 0;"></div>
+
+    <div style="width:100%; padding:10px; background:#d97757; color:#000; font-size:11px; letter-spacing:2px; text-align:center; cursor:pointer; font-weight:600; margin-top:12px;">SAVE & REBOOT</div>
+  </div>
+</div>
+
+</body>
+</html>

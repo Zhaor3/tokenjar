@@ -10,8 +10,7 @@ Claude Admin API &bull; OpenAI Admin API &bull; Claude.ai Pro/Max Plan Usage
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/tag/Zhaor3/tokenjar?label=version)](https://github.com/Zhaor3/tokenjar/releases)
 
-<!-- Replace with your own photo of the device -->
-<!-- ![TOKENJAR on desk](docs/hero.jpg) -->
+![TOKENJAR screens](docs/hero.png)
 
 </div>
 
@@ -207,6 +206,15 @@ The cookie auto-renews via `Set-Cookie` headers, so you typically only need to p
 | **Settings** | WiFi status, IP address, free heap, uptime |
 
 Only screens for configured providers appear. If you only set up Claude, you'll only see Claude screens.
+
+<details>
+<summary><b>Screen previews</b></summary>
+
+| Claude Admin API | Claude Plan (Pro/Max) | OpenAI Admin API |
+|:---:|:---:|:---:|
+| ![Claude](docs/screen_claude.png) | ![Plan](docs/screen_plan.png) | ![OpenAI](docs/screen_openai.png) |
+
+</details>
 
 ---
 
