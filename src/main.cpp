@@ -262,7 +262,8 @@ static void portalSetup() {
     IPAddress subnet(255, 255, 255, 0);
     WiFi.softAPConfig(local_ip, gateway, subnet);
     WiFi.softAP(AP_SSID);
-    delay(1000);  // Give AP time to fully start
+    WiFi.setSleep(false);    // prevent random client disconnects
+    delay(1000);             // give AP time to fully start
 
     Serial.printf("[PORTAL] AP started: SSID=%s  IP=%s\n",
         AP_SSID, WiFi.softAPIP().toString().c_str());
@@ -368,7 +369,46 @@ static void portalSetup() {
         ESP.restart();
     });
 
-    // Captive portal catch-all
+    // ── Captive-portal detection endpoints ─────────────────────────
+    // OS-level connectivity checks hit these URLs. Returning the
+    // expected response prevents the OS from flagging "no internet"
+    // and disconnecting the client from the AP.
+
+    // Android
+    portal_server->on("/generate_204", HTTP_GET, []() {
+        portal_server->send(204, "", "");
+    });
+    portal_server->on("/gen_204", HTTP_GET, []() {
+        portal_server->send(204, "", "");
+    });
+
+    // Apple iOS / macOS
+    portal_server->on("/hotspot-detect.html", HTTP_GET, []() {
+        portal_server->send(200, "text/html",
+            "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    });
+    portal_server->on("/library/test/success.html", HTTP_GET, []() {
+        portal_server->send(200, "text/html",
+            "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
+    });
+
+    // Windows
+    portal_server->on("/connecttest.txt", HTTP_GET, []() {
+        portal_server->send(200, "text/plain", "Microsoft Connect Test");
+    });
+    portal_server->on("/ncsi.txt", HTTP_GET, []() {
+        portal_server->send(200, "text/plain", "Microsoft NCSI");
+    });
+    portal_server->on("/redirect", HTTP_GET, []() {
+        portal_server->sendHeader("Location", "http://192.168.4.1/");
+        portal_server->send(302, "text/plain", "");
+    });
+    portal_server->on("/fwlink", HTTP_GET, []() {
+        portal_server->sendHeader("Location", "http://192.168.4.1/");
+        portal_server->send(302, "text/plain", "");
+    });
+
+    // Catch-all — redirect everything else to the setup page
     portal_server->onNotFound([]() {
         portal_server->sendHeader("Location", "http://192.168.4.1/", true);
         portal_server->send(302, "text/plain", "");
