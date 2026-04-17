@@ -67,6 +67,11 @@ public:
     static void      orientationChoiceSetSel(bool horizontal);
     static bool      orientationChoiceGetSel();
 
+    // Factory-reset confirmation (long-press from RUNNING).
+    static lv_obj_t* makeResetConfirm();
+    static void      resetConfirmSetSel(bool yes);
+    static bool      resetConfirmGetSel();
+
     Mode currentMode() const { return modes_[cur_idx_]; }
     bool isHorizontal() const { return horizontal_; }
 };

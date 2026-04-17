@@ -53,9 +53,12 @@ static uint8_t lvBuf[SCREEN_MAX_DIM * 20 * sizeof(lv_color_t)];
 
 // ── App state machine ────────────────────────────────────────────
 
-enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING };
+enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING, RESET_CONFIRM };
 static State state = State::SPLASH;
 static uint32_t stateStart = 0;
+
+// Screen to restore when user cancels the reset confirmation.
+static lv_obj_t* g_prevScreen = nullptr;
 
 // Orientation chosen at boot (horizontal is the new default)
 static bool g_horizontal   = true;
@@ -370,43 +373,30 @@ static void portalSetup() {
     });
 
     // ── Captive-portal detection endpoints ─────────────────────────
-    // OS-level connectivity checks hit these URLs. Returning the
-    // expected response prevents the OS from flagging "no internet"
-    // and disconnecting the client from the AP.
+    // Clients probe these URLs to decide whether to show their
+    // "Sign in to network" popup. Returning a redirect (instead of
+    // the OS's expected "success" response) signals that a captive
+    // portal is in the way, which is exactly what we want — the OS
+    // then surfaces the portal page automatically.
+    auto redirectToPortal = []() {
+        portal_server->sendHeader("Location", "http://192.168.4.1/", true);
+        portal_server->sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        portal_server->send(302, "text/plain", "");
+    };
 
     // Android
-    portal_server->on("/generate_204", HTTP_GET, []() {
-        portal_server->send(204, "", "");
-    });
-    portal_server->on("/gen_204", HTTP_GET, []() {
-        portal_server->send(204, "", "");
-    });
+    portal_server->on("/generate_204", HTTP_GET, redirectToPortal);
+    portal_server->on("/gen_204",      HTTP_GET, redirectToPortal);
 
-    // Apple iOS / macOS
-    portal_server->on("/hotspot-detect.html", HTTP_GET, []() {
-        portal_server->send(200, "text/html",
-            "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
-    });
-    portal_server->on("/library/test/success.html", HTTP_GET, []() {
-        portal_server->send(200, "text/html",
-            "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");
-    });
+    // Apple iOS / macOS — any body other than "Success" triggers the popup.
+    portal_server->on("/hotspot-detect.html",        HTTP_GET, redirectToPortal);
+    portal_server->on("/library/test/success.html", HTTP_GET, redirectToPortal);
 
     // Windows
-    portal_server->on("/connecttest.txt", HTTP_GET, []() {
-        portal_server->send(200, "text/plain", "Microsoft Connect Test");
-    });
-    portal_server->on("/ncsi.txt", HTTP_GET, []() {
-        portal_server->send(200, "text/plain", "Microsoft NCSI");
-    });
-    portal_server->on("/redirect", HTTP_GET, []() {
-        portal_server->sendHeader("Location", "http://192.168.4.1/");
-        portal_server->send(302, "text/plain", "");
-    });
-    portal_server->on("/fwlink", HTTP_GET, []() {
-        portal_server->sendHeader("Location", "http://192.168.4.1/");
-        portal_server->send(302, "text/plain", "");
-    });
+    portal_server->on("/connecttest.txt", HTTP_GET, redirectToPortal);
+    portal_server->on("/ncsi.txt",        HTTP_GET, redirectToPortal);
+    portal_server->on("/redirect",        HTTP_GET, redirectToPortal);
+    portal_server->on("/fwlink",          HTTP_GET, redirectToPortal);
 
     // Catch-all — redirect everything else to the setup page
     portal_server->onNotFound([]() {
@@ -631,12 +621,15 @@ void loop() {
             if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();
         }
-        // Encoder: long press → factory reset, re-enter setup portal
+        // Encoder: long press → show reset confirmation prompt
         if (enc.wasLongPressed()) {
-            Serial.println("Long-press — rebooting into setup portal...");
-            store.clear();
-            delay(200);
-            ESP.restart();
+            Serial.println("Long-press — showing reset confirmation");
+            enc.rotation();    // discard any rotation accumulated during the long hold
+            g_prevScreen = lv_screen_active();
+            lv_obj_t* confirm = UIManager::makeResetConfirm();
+            lv_screen_load(confirm);
+            state = State::RESET_CONFIRM;
+            break;
         }
         // Encoder: rotation → change timeframe + refresh all data
         int rot = enc.rotation();
@@ -674,6 +667,35 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED)
             ArduinoOTA.handle();
 
+        break;
+    }
+
+    // ── RESET CONFIRMATION ───────────────────────────────────────
+    case State::RESET_CONFIRM: {
+        int rot = enc.rotation();
+        if (rot != 0) {
+            UIManager::resetConfirmSetSel(!UIManager::resetConfirmGetSel());
+        }
+        if (enc.wasPressed()) {
+            if (UIManager::resetConfirmGetSel()) {
+                Serial.println("Reset confirmed — rebooting into setup portal...");
+                store.clear();
+                delay(200);
+                ESP.restart();
+            } else {
+                Serial.println("Reset cancelled");
+                if (g_prevScreen) lv_screen_load(g_prevScreen);
+                ui.onActivity();
+                state = State::RUNNING;
+            }
+        }
+        // Long-press in confirm screen also cancels.
+        if (enc.wasLongPressed()) {
+            Serial.println("Reset cancelled (long-press)");
+            if (g_prevScreen) lv_screen_load(g_prevScreen);
+            ui.onActivity();
+            state = State::RUNNING;
+        }
         break;
     }
     } // switch

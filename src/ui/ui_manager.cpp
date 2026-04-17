@@ -374,3 +374,73 @@ void UIManager::orientationChoiceSetSel(bool horizontal) {
 bool UIManager::orientationChoiceGetSel() {
     return s_orient_sel_horizontal;
 }
+
+// ── Reset confirmation screen ────────────────────────────────────
+static lv_obj_t* s_reset_lbl_no  = nullptr;
+static lv_obj_t* s_reset_lbl_yes = nullptr;
+static bool      s_reset_sel_yes = false;   // default = NO (safer)
+
+lv_obj_t* UIManager::makeResetConfirm() {
+    s_reset_sel_yes = false;
+
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, Color::bg(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t* title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, Font::label(), 0);
+    lv_obj_set_style_text_color(title, Color::claude(), 0);
+    lv_obj_set_style_text_letter_space(title, 3, 0);
+    lv_label_set_text(title, "FACTORY RESET?");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
+
+    lv_obj_t* sub = lv_label_create(scr);
+    lv_obj_set_style_text_font(sub, Font::small(), 0);
+    lv_obj_set_style_text_color(sub, Color::dim(), 0);
+    lv_obj_set_style_text_letter_space(sub, 1, 0);
+    lv_label_set_text(sub, "ERASES WIFI & API KEYS");
+    lv_obj_align(sub, LV_ALIGN_TOP_MID, 0, 46);
+
+    s_reset_lbl_no = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_reset_lbl_no, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_reset_lbl_no, 3, 0);
+    lv_obj_align(s_reset_lbl_no, LV_ALIGN_CENTER, 0, -8);
+
+    s_reset_lbl_yes = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_reset_lbl_yes, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_reset_lbl_yes, 3, 0);
+    lv_obj_align(s_reset_lbl_yes, LV_ALIGN_CENTER, 0, 22);
+
+    lv_obj_t* hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(hint, Font::small(), 0);
+    lv_obj_set_style_text_color(hint, Color::vdim(), 0);
+    lv_label_set_text(hint, "TURN TO CHANGE  *  CLICK TO CONFIRM");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    resetConfirmSetSel(false);
+    return scr;
+}
+
+void UIManager::resetConfirmSetSel(bool yes) {
+    s_reset_sel_yes = yes;
+    if (!s_reset_lbl_no || !s_reset_lbl_yes) return;
+
+    if (yes) {
+        lv_label_set_text(s_reset_lbl_no,  "   NO");
+        lv_label_set_text(s_reset_lbl_yes, ">  YES, RESET  <");
+        lv_obj_set_style_text_color(s_reset_lbl_no,  Color::dim(),    0);
+        lv_obj_set_style_text_color(s_reset_lbl_yes, Color::claude(), 0);
+    } else {
+        lv_label_set_text(s_reset_lbl_no,  ">  NO  <");
+        lv_label_set_text(s_reset_lbl_yes, "   YES, RESET");
+        lv_obj_set_style_text_color(s_reset_lbl_no,  Color::claude(), 0);
+        lv_obj_set_style_text_color(s_reset_lbl_yes, Color::dim(),    0);
+    }
+    lv_obj_align(s_reset_lbl_no,  LV_ALIGN_CENTER, 0, -8);
+    lv_obj_align(s_reset_lbl_yes, LV_ALIGN_CENTER, 0, 22);
+}
+
+bool UIManager::resetConfirmGetSel() {
+    return s_reset_sel_yes;
+}

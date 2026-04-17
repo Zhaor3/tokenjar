@@ -49,6 +49,14 @@ You're burning through API credits across Claude and OpenAI — Cursor, Copilot,
 
 ## Hardware
 
+<div align="center">
+
+| | |
+|:---:|:---:|
+| ![Front view](docs/product_openai.png) | ![Angled view](docs/product_angle.png) |
+
+</div>
+
 | Part | Spec | ~Cost |
 |------|------|-------|
 | MCU | ESP32-S3 SuperMini (4 MB flash, no PSRAM) | $4 |
@@ -194,7 +202,7 @@ The cookie auto-renews via `Set-Cookie` headers, so you typically only need to p
 |--------|--------|
 | **Press** encoder | Next screen + refresh all data |
 | **Rotate** encoder | Change timeframe (1h / 6h / Today / 7d / 30d) + refresh all data |
-| **Long press** (>1s) | Factory reset — reboots into setup portal |
+| **Long press** (>1s) | Open factory-reset prompt — rotate to pick `NO`/`YES`, click to confirm (or long-press again to cancel) |
 
 ### Screens
 
