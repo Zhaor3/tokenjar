@@ -216,6 +216,15 @@ Only screens for configured providers appear. If you only set up Claude, you'll 
 
 </details>
 
+<details>
+<summary><b>The device</b></summary>
+
+| Claude Plan | OpenAI | Angled |
+|:---:|:---:|:---:|
+| ![Plan on device](docs/product_plan.png) | ![OpenAI on device](docs/product_openai.png) | ![Angled shot](docs/product_angle.png) |
+
+</details>
+
 ---
 
 ## Configuration
