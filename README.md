@@ -9,6 +9,7 @@ Claude Admin API &bull; OpenAI Admin API &bull; Claude.ai Pro/Max Plan Usage
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange?logo=platformio)](https://platformio.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/tag/Zhaor3/tokenjar?label=version)](https://github.com/Zhaor3/tokenjar/releases)
+[![Printables](https://img.shields.io/badge/Printables-Download_STL-F97316?logo=prusa&logoColor=white)](https://www.printables.com/model/1691783-tokenjar-real-time-claude-openai-spend-monitor)
 
 ![TOKENJAR screens](docs/hero.png)
 
@@ -56,6 +57,8 @@ You're burning through API credits across Claude and OpenAI — Cursor, Copilot,
 | ![Front view](docs/product_plan.png) | ![Angled view](docs/product_angle.png) |
 
 </div>
+
+> **3D-printable case:** [Download the STLs from Printables](https://www.printables.com/model/1691783-tokenjar-real-time-claude-openai-spend-monitor)
 
 | Part | Spec | ~Cost |
 |------|------|-------|
