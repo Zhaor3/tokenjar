@@ -53,7 +53,7 @@ You're burning through API credits across Claude and OpenAI — Cursor, Copilot,
 
 | | |
 |:---:|:---:|
-| ![Front view](docs/product_openai.png) | ![Angled view](docs/product_angle.png) |
+| ![Front view](docs/product_plan.png) | ![Angled view](docs/product_angle.png) |
 
 </div>
 
