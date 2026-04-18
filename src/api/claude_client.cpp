@@ -111,6 +111,28 @@ static int parseCostBuckets(const String& body, float* out, int maxBuckets) {
     return n;
 }
 
+// Estimate dollar cost from a usage_report response using Claude Sonnet 4
+// pricing (per 1M tokens, USD): input $3, output $15, cache_read $0.30,
+// cache_5m $3.75 (1.25× input), cache_1h $6 (2× input).
+// Used for today's spend because cost_report excludes any in-progress day.
+// Locked to Sonnet 4 — heavy Opus usage will under-estimate.
+static float estimateSonnet4Cost(const String& body) {
+    JsonDocument doc;
+    if (deserializeJson(doc, body) != DeserializationError::Ok) return 0;
+    double total = 0;
+    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
+        for (JsonObject r : bucket["results"].as<JsonArray>()) {
+            JsonObject cc = r["cache_creation"];
+            total += (double)(uint64_t)(r["uncached_input_tokens"]      | 0) * 3.00e-6;
+            total += (double)(uint64_t)(r["output_tokens"]              | 0) * 15.00e-6;
+            total += (double)(uint64_t)(r["cache_read_input_tokens"]    | 0) * 0.30e-6;
+            total += (double)(uint64_t)(cc["ephemeral_5m_input_tokens"] | 0) * 3.75e-6;
+            total += (double)(uint64_t)(cc["ephemeral_1h_input_tokens"] | 0) * 6.00e-6;
+        }
+    }
+    return (float)total;
+}
+
 // Parse tokens from data[].results[].
 // cache_creation is a nested object ({ephemeral_1h_input_tokens, ephemeral_5m_input_tokens}).
 // Leaving it out undercounts caching-heavy workloads like Claude Code.
@@ -159,28 +181,17 @@ bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
     Serial.printf("[CLAUDE] Date range: today=%s tomorrow=%s month=%s\n",
         todayStart, tomorrowStart, monthStart);
 
-    // ── Today's cost ─────────────────────────────────────────────
-    {
-        char url[256];
-        snprintf(url, sizeof(url),
-            "https://api.anthropic.com/v1/organizations/cost_report"
-            "?starting_at=%s&ending_at=%s&bucket_width=1d&limit=1",
-            todayStart, tomorrowStart);
+    // Anthropic's cost_report ONLY supports bucket_width=1d (1h returns HTTP
+    // 400: "Input should be '1d'"), and 1d buckets exclude any in-progress
+    // day. So today's exact cost is unavailable from the Admin API. We
+    // estimate it from today's per-token-type usage using Sonnet 4 pricing
+    // (see estimateSonnet4Cost). Catches up exactly tomorrow when today
+    // rolls into past_days.
 
-        String body;
-        if (apiGet(url, apiKey, body)) {
-            gotData = true;
-            Serial.printf("[CLAUDE] Today cost raw: %.400s\n", body.c_str());
-            out.spend_today = parseCostResponse(body);
-        } else {
-            Serial.println("[CLAUDE] Today cost fetch FAILED");
-        }
-    }
-
-    // ── Month cost ───────────────────────────────────────────────
-    // limit=31 covers a full month; the default is small enough to truncate.
-    // We also reuse the per-bucket daily totals to drive the sparkline so
-    // it shows real variation instead of a flat line.
+    // ── Month cost (past days only) ──────────────────────────────
+    // Per-day buckets also drive the sparkline.
+    float past_days_cost = 0;
+    bool got_past_cost = false;
     float dailyBuckets[SPARK_POINTS] = {0};
     int dailyCount = 0;
     {
@@ -193,30 +204,40 @@ bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
         String body;
         if (apiGet(url, apiKey, body)) {
             gotData = true;
+            got_past_cost = true;
             Serial.printf("[CLAUDE] Month cost raw: %.200s...\n", body.c_str());
-            out.spend_month = parseCostResponse(body);
+            past_days_cost = parseCostResponse(body);
             dailyCount = parseCostBuckets(body, dailyBuckets, SPARK_POINTS);
         }
     }
 
-    // ── Today's tokens ───────────────────────────────────────────
+    // ── Today's tokens + cost estimate ───────────────────────────
+    // 1h buckets work for usage_report (unlike cost_report) and capture
+    // the in-progress day. We also compute a Sonnet-4 priced cost estimate
+    // from the same response since cost_report won't return today.
+    uint64_t today_tokens = out.tokens_today;   // seed with cached value
+    float    today_cost   = out.spend_today;    // seed with cached value
     {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.anthropic.com/v1/organizations/usage_report/messages"
-            "?starting_at=%s&ending_at=%s&bucket_width=1d&limit=1",
+            "?starting_at=%s&ending_at=%s&bucket_width=1h&limit=24",
             todayStart, tomorrowStart);
 
         String body;
         if (apiGet(url, apiKey, body)) {
             gotData = true;
             Serial.printf("[CLAUDE] Today tokens raw: %.400s\n", body.c_str());
-            out.tokens_today = parseTokenResponse(body);
-            Serial.printf("[CLAUDE] tokens_today = %llu\n", (unsigned long long)out.tokens_today);
+            today_tokens = parseTokenResponse(body);
+            today_cost   = estimateSonnet4Cost(body);
+            out.tokens_today = today_tokens;
+            out.spend_today  = today_cost;
+            Serial.printf("[CLAUDE] tokens_today = %llu, est_cost = $%.4f (Sonnet 4)\n",
+                (unsigned long long)out.tokens_today, today_cost);
         }
     }
 
-    // ── Month tokens ─────────────────────────────────────────────
+    // ── Month tokens (past days) ─────────────────────────────────
     // Without limit, usage_report defaults to 7 buckets for bucket_width=1d,
     // silently truncating anything past day 7 of the month.
     {
@@ -229,14 +250,29 @@ bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
         String body;
         if (apiGet(url, apiKey, body)) {
             gotData = true;
-            out.tokens_month = parseTokenResponse(body);
-            Serial.printf("[CLAUDE] tokens_month = %llu\n", (unsigned long long)out.tokens_month);
+            uint64_t past_days_tokens = parseTokenResponse(body);
+            out.tokens_month = past_days_tokens + today_tokens;
+            Serial.printf("[CLAUDE] tokens_month = %llu (past=%llu + today=%llu)\n",
+                (unsigned long long)out.tokens_month,
+                (unsigned long long)past_days_tokens,
+                (unsigned long long)today_tokens);
         }
+    }
+
+    // ── Combine month total ──────────────────────────────────────
+    // past_days_cost from cost_report (real, completed days) + today_cost
+    // estimated from Sonnet 4 token pricing.
+    if (got_past_cost) {
+        out.spend_month = past_days_cost + today_cost;
+        Serial.printf("[CLAUDE] Month: past_days=$%.4f + today_est=$%.4f = $%.4f\n",
+            past_days_cost, today_cost, out.spend_month);
     }
 
     // Build sparkline from the per-day cost buckets we already fetched
     // for the month. Right-align so the newest day sits at the right edge;
     // leading slots are zero until there is enough history to fill.
+    // Overlay today's actual cost on the last slot — the 1d response either
+    // omits today or returns an empty bucket for it.
     for (int i = 0; i < SPARK_POINTS; i++) out.hourly_spend[i] = 0;
     if (dailyCount > 0) {
         int copy = dailyCount < SPARK_POINTS ? dailyCount : SPARK_POINTS;
@@ -245,6 +281,7 @@ bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
                 dailyBuckets[dailyCount - copy + i];
         }
     }
+    out.hourly_spend[SPARK_POINTS - 1] = today_cost;
 
     out.last_updated = time(nullptr);
     out.valid = gotData;
