@@ -67,10 +67,23 @@ public:
     static void      orientationChoiceSetSel(bool horizontal);
     static bool      orientationChoiceGetSel();
 
-    // Factory-reset confirmation (long-press from RUNNING).
+    // Factory-reset confirmation (reached from the settings menu).
     static lv_obj_t* makeResetConfirm();
     static void      resetConfirmSetSel(bool yes);
     static bool      resetConfirmGetSel();
+
+    // Interactive settings menu (long-press from RUNNING).
+    // Rows: 0 = default timeframe, 1 = factory reset, 2 = back.
+    // When editing the timeframe row, rotation cycles values instead of rows.
+    enum class SettingsMenuAction { NONE, CHANGE_DEFAULT_TF, FACTORY_RESET, BACK };
+    static lv_obj_t*         makeSettingsMenu(Timeframe initialDefault);
+    static void              settingsMenuRotate(int delta);
+    static SettingsMenuAction settingsMenuClick();    // returns action to perform
+    static Timeframe         settingsMenuTimeframe(); // current selected timeframe value
+
+    // Apply a new live timeframe (called after saving the default).
+    void setTimeframe(Timeframe t) { timeframe_ = t; }
+    Timeframe timeframe() const { return timeframe_; }
 
     Mode currentMode() const { return modes_[cur_idx_]; }
     bool isHorizontal() const { return horizontal_; }

@@ -59,6 +59,11 @@ public:
     bool   hasOrientation();
     bool   orientationHorizontal();  // true if horizontal (default)
 
+    // Default timeframe shown on provider screens at boot.
+    // Stored as the underlying uint8_t of Timeframe; defaults to H24 (TODAY).
+    void      setDefaultTimeframe(Timeframe t);
+    Timeframe defaultTimeframe();
+
     // Cached snapshots (survive reboot)
     void saveCache(const char* provider, const UsageSnapshot& s);
     bool loadCache(const char* provider, UsageSnapshot& s);

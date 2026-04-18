@@ -62,6 +62,17 @@ bool   SettingsStore::orientationHorizontal() {
     return orientation() != "vertical";
 }
 
+// ── Default timeframe ────────────────────────────────────────────
+void SettingsStore::setDefaultTimeframe(Timeframe t) {
+    prefs_.putUChar("def_tf", (uint8_t)t);
+}
+
+Timeframe SettingsStore::defaultTimeframe() {
+    uint8_t v = prefs_.getUChar("def_tf", (uint8_t)Timeframe::H24);
+    if (v >= (uint8_t)Timeframe::_COUNT) v = (uint8_t)Timeframe::H24;
+    return (Timeframe)v;
+}
+
 // ── Snapshot cache ───────────────────────────────────────────────
 void SettingsStore::saveCache(const char* prov, const UsageSnapshot& s) {
     char key[16];

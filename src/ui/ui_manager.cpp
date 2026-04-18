@@ -53,6 +53,9 @@ void UIManager::init(SettingsStore& store, bool horizontal) {
         : static_cast<IScreenSettings*>(new ScreenSettings());
     modes_[num_modes_++] = Mode::SETTINGS;
 
+    // Seed the active timeframe from the user's saved default.
+    timeframe_ = store.defaultTimeframe();
+
     cur_idx_   = 0;
     bl_target_ = BL_FULL;
     bl_current_= BL_FULL;
@@ -444,3 +447,123 @@ void UIManager::resetConfirmSetSel(bool yes) {
 bool UIManager::resetConfirmGetSel() {
     return s_reset_sel_yes;
 }
+
+// ── Settings menu screen ─────────────────────────────────────────
+// Three-row menu: DEFAULT PAGE, FACTORY RESET, BACK.
+// Rotation moves between rows when not editing, or cycles timeframes when
+// editing the DEFAULT PAGE row. Click either enters/exits edit mode on
+// the timeframe row, or emits an action (FACTORY_RESET / BACK) for the
+// caller to react to.
+static constexpr int SM_ROW_DEFAULT_TF  = 0;
+static constexpr int SM_ROW_RESET       = 1;
+static constexpr int SM_ROW_BACK        = 2;
+static constexpr int SM_NUM_ROWS        = 3;
+
+static lv_obj_t* s_sm_labels[SM_NUM_ROWS] = { nullptr, nullptr, nullptr };
+static lv_obj_t* s_sm_tf_value = nullptr;    // current-value text on row 0
+static int       s_sm_sel_row  = 0;
+static bool      s_sm_editing  = false;
+static Timeframe s_sm_tf       = Timeframe::H24;
+
+static const char* s_sm_row_labels[SM_NUM_ROWS] = {
+    "DEFAULT PAGE",
+    "FACTORY RESET",
+    "BACK",
+};
+
+static void settingsMenuRender() {
+    if (!s_sm_labels[0]) return;
+    for (int i = 0; i < SM_NUM_ROWS; i++) {
+        char buf[48];
+        bool sel = (i == s_sm_sel_row);
+        const char* marker = sel ? (s_sm_editing ? "*" : ">") : " ";
+        snprintf(buf, sizeof(buf), "%s  %s", marker, s_sm_row_labels[i]);
+        lv_label_set_text(s_sm_labels[i], buf);
+        lv_obj_set_style_text_color(s_sm_labels[i],
+            sel ? Color::claude() : Color::dim(), 0);
+    }
+    if (s_sm_tf_value) {
+        lv_label_set_text(s_sm_tf_value, timeframeLabel(s_sm_tf));
+        lv_obj_set_style_text_color(s_sm_tf_value,
+            s_sm_editing ? Color::claude() : Color::text(), 0);
+    }
+}
+
+lv_obj_t* UIManager::makeSettingsMenu(Timeframe initialDefault) {
+    s_sm_sel_row = 0;
+    s_sm_editing = false;
+    s_sm_tf      = initialDefault;
+
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, Color::bg(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t* title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, Font::label(), 0);
+    lv_obj_set_style_text_color(title, Color::dim(), 0);
+    lv_obj_set_style_text_letter_space(title, 3, 0);
+    lv_label_set_text(title, "SETTINGS");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+    // Three rows, vertically stacked near center.
+    int y_offsets[SM_NUM_ROWS] = { -34, -6, 22 };
+    for (int i = 0; i < SM_NUM_ROWS; i++) {
+        s_sm_labels[i] = lv_label_create(scr);
+        lv_obj_set_style_text_font(s_sm_labels[i], Font::label(), 0);
+        lv_obj_set_style_text_letter_space(s_sm_labels[i], 2, 0);
+        lv_obj_align(s_sm_labels[i], LV_ALIGN_CENTER, -40, y_offsets[i]);
+    }
+
+    // Current-timeframe value shown to the right of the DEFAULT PAGE row.
+    s_sm_tf_value = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_sm_tf_value, Font::label(), 0);
+    lv_obj_set_style_text_letter_space(s_sm_tf_value, 2, 0);
+    lv_obj_align(s_sm_tf_value, LV_ALIGN_CENTER, 60, y_offsets[SM_ROW_DEFAULT_TF]);
+
+    lv_obj_t* hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(hint, Font::small(), 0);
+    lv_obj_set_style_text_color(hint, Color::vdim(), 0);
+    lv_label_set_text(hint, "TURN TO NAVIGATE  *  CLICK TO SELECT");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    settingsMenuRender();
+    return scr;
+}
+
+void UIManager::settingsMenuRotate(int delta) {
+    if (delta == 0) return;
+    int step = (delta > 0) ? 1 : -1;
+    int n    = (delta > 0) ? delta : -delta;
+
+    if (s_sm_editing) {
+        int v = (int)s_sm_tf;
+        int mx = (int)Timeframe::_COUNT;
+        for (int i = 0; i < n; i++) {
+            v = (v + step + mx) % mx;
+        }
+        s_sm_tf = (Timeframe)v;
+    } else {
+        for (int i = 0; i < n; i++) {
+            s_sm_sel_row = (s_sm_sel_row + step + SM_NUM_ROWS) % SM_NUM_ROWS;
+        }
+    }
+    settingsMenuRender();
+}
+
+UIManager::SettingsMenuAction UIManager::settingsMenuClick() {
+    if (s_sm_sel_row == SM_ROW_DEFAULT_TF) {
+        // Toggle edit mode. Returning CHANGE_DEFAULT_TF lets the caller
+        // persist the value whenever the user exits edit mode.
+        bool wasEditing = s_sm_editing;
+        s_sm_editing = !s_sm_editing;
+        settingsMenuRender();
+        return wasEditing ? SettingsMenuAction::CHANGE_DEFAULT_TF
+                          : SettingsMenuAction::NONE;
+    }
+    if (s_sm_sel_row == SM_ROW_RESET) return SettingsMenuAction::FACTORY_RESET;
+    if (s_sm_sel_row == SM_ROW_BACK)  return SettingsMenuAction::BACK;
+    return SettingsMenuAction::NONE;
+}
+
+Timeframe UIManager::settingsMenuTimeframe() { return s_sm_tf; }

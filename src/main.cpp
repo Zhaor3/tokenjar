@@ -53,7 +53,7 @@ static uint8_t lvBuf[SCREEN_MAX_DIM * 20 * sizeof(lv_color_t)];
 
 // ── App state machine ────────────────────────────────────────────
 
-enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING, RESET_CONFIRM };
+enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING, SETTINGS_MENU, RESET_CONFIRM };
 static State state = State::SPLASH;
 static uint32_t stateStart = 0;
 
@@ -85,7 +85,18 @@ static void apiRefreshLoop(void*) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(API_REFRESH_MS));
 
         // ── Admin API fetches (every wake-up, ~60s) ──────────────
-        UsageSnapshot c = {}, o = {};
+        // Seed each fetch with the last known snapshot so a transient
+        // failure on one of the subqueries (today's cost, month cost, etc.)
+        // preserves the previous values instead of wiping them to $0.
+        UsageSnapshot c, o;
+        if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+            c = claudeSnap;
+            o = openaiSnap;
+            xSemaphoreGive(dataMtx);
+        } else {
+            memset(&c, 0, sizeof(c));
+            memset(&o, 0, sizeof(o));
+        }
 
         String ck = store.claudeKey();
         if (ck.length() > 0)
@@ -570,8 +581,17 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
-            // Time sync
+            // Time sync — wait briefly for NTP to set the clock. Without a
+            // valid epoch the first API fetch queries 1970-01-01 and gets back
+            // an empty data array, which is cached as $0 / 0 tokens for today
+            // until the next refresh.
             configTzTime(store.timezone().c_str(), NTP_SERVER);
+            uint32_t tsyncStart = millis();
+            while (time(nullptr) < 1700000000 && millis() - tsyncStart < 5000) {
+                delay(100);
+            }
+            Serial.printf("NTP sync: epoch=%ld after %lums\n",
+                (long)time(nullptr), millis() - tsyncStart);
 
             // mDNS
             MDNS.begin(MDNS_HOST);
@@ -621,14 +641,14 @@ void loop() {
             if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();
         }
-        // Encoder: long press → show reset confirmation prompt
+        // Encoder: long press → open interactive settings menu
         if (enc.wasLongPressed()) {
-            Serial.println("Long-press — showing reset confirmation");
+            Serial.println("Long-press — opening settings menu");
             enc.rotation();    // discard any rotation accumulated during the long hold
             g_prevScreen = lv_screen_active();
-            lv_obj_t* confirm = UIManager::makeResetConfirm();
-            lv_screen_load(confirm);
-            state = State::RESET_CONFIRM;
+            lv_obj_t* menu = UIManager::makeSettingsMenu(store.defaultTimeframe());
+            lv_screen_load(menu);
+            state = State::SETTINGS_MENU;
             break;
         }
         // Encoder: rotation → change timeframe + refresh all data
@@ -667,6 +687,54 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED)
             ArduinoOTA.handle();
 
+        break;
+    }
+
+    // ── SETTINGS MENU ────────────────────────────────────────────
+    case State::SETTINGS_MENU: {
+        int rot = enc.rotation();
+        if (rot != 0) UIManager::settingsMenuRotate(rot);
+
+        if (enc.wasPressed()) {
+            auto action = UIManager::settingsMenuClick();
+            switch (action) {
+                case UIManager::SettingsMenuAction::NONE:
+                    // Click entered edit mode on the timeframe row — keep
+                    // the menu up so rotation now cycles timeframes.
+                    ui.onActivity();
+                    break;
+                case UIManager::SettingsMenuAction::CHANGE_DEFAULT_TF: {
+                    Timeframe tf = UIManager::settingsMenuTimeframe();
+                    store.setDefaultTimeframe(tf);
+                    ui.setTimeframe(tf);
+                    ui.updateData(claudeSnap, openaiSnap, store);
+                    Serial.printf("Default timeframe set to %s\n",
+                        timeframeLabel(tf));
+                    ui.onActivity();
+                    break;
+                }
+                case UIManager::SettingsMenuAction::FACTORY_RESET: {
+                    Serial.println("Settings → factory reset requested");
+                    lv_obj_t* confirm = UIManager::makeResetConfirm();
+                    lv_screen_load(confirm);
+                    state = State::RESET_CONFIRM;
+                    break;
+                }
+                case UIManager::SettingsMenuAction::BACK:
+                    if (g_prevScreen) lv_screen_load(g_prevScreen);
+                    ui.onActivity();
+                    state = State::RUNNING;
+                    break;
+            }
+        }
+
+        // Long-press anywhere in the menu exits back to the previous screen.
+        if (enc.wasLongPressed()) {
+            Serial.println("Settings menu dismissed (long-press)");
+            if (g_prevScreen) lv_screen_load(g_prevScreen);
+            ui.onActivity();
+            state = State::RUNNING;
+        }
         break;
     }
 
