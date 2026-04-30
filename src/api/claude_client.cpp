@@ -3,14 +3,17 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Anthropic Admin API
 // Docs: https://platform.claude.com/docs/en/api/admin-api/usage-cost
 // Cost report: GET /v1/organizations/cost_report?starting_at=...&ending_at=...
-//   Response: { "data": [ { "results": [ { "amount": "123.45", "currency": "USD", ... } ] } ] }
+//   Response: { "data": [ { "result": [ { "amount": "123.45", "currency": "USD", ... } ] } ] }
 //   amount is a STRING in CENTS (lowest currency unit)
 // Usage report: GET /v1/organizations/usage_report/messages?starting_at=...&ending_at=...
-//   Response: { "data": [ { "results": [ { "uncached_input_tokens": N, "output_tokens": N, ... } ] } ] }
+//   Response: { "data": [ { "result": [ { "uncached_input_tokens": N, "cache_creation": {...},
+//               "output_tokens": N, ... } ] } ] }
 
 // RFC 3339 date formatters (UTC)
 static void todayStartUTC(char* buf, size_t len) {
@@ -20,11 +23,11 @@ static void todayStartUTC(char* buf, size_t len) {
     strftime(buf, len, "%Y-%m-%dT00:00:00Z", &t);
 }
 
-static void tomorrowStartUTC(char* buf, size_t len) {
-    time_t now = time(nullptr) + 86400;
+static void nowUTC(char* buf, size_t len) {
+    time_t now = time(nullptr);
     struct tm t;
     gmtime_r(&now, &t);
-    snprintf(buf, len, "%04d-%02d-%02dT00:00:00Z", t.tm_year + 1900, t.tm_mon + 1, t.tm_mday);
+    strftime(buf, len, "%Y-%m-%dT%H:%M:%SZ", &t);
 }
 
 static void monthStartUTC(char* buf, size_t len) {
@@ -63,79 +66,100 @@ static bool apiGet(const char* url, const char* apiKey, String& body) {
     return false;
 }
 
-// Read one result row's `amount` as dollars.
-// The Anthropic cost_report returns `amount` as a decimal string in CENTS.
-static float readAmountDollars(JsonObject r) {
-    float cents = 0;
-    if (r["amount"].is<const char*>()) {
-        cents = String(r["amount"].as<const char*>()).toFloat();
-    } else {
-        cents = r["amount"].as<float>();
-    }
-    return cents / 100.0f;
+static JsonArrayConst bucketResults(JsonObjectConst bucket) {
+    JsonArrayConst arr = bucket["result"].as<JsonArrayConst>();
+    if (arr.isNull()) arr = bucket["results"].as<JsonArrayConst>();
+    return arr;
 }
 
-// Parse cost from data[].results[].amount (string in cents)
-static float parseCostResponse(const String& body) {
+static float numOrStr(JsonVariantConst v) {
+    if (v.isNull()) return 0.0f;
+    if (v.is<float>() || v.is<double>()) return v.as<float>();
+    if (v.is<int>() || v.is<long>()) return (float)v.as<long>();
+    if (v.is<unsigned int>() || v.is<unsigned long>()) return (float)v.as<unsigned long>();
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        return s ? (float)atof(s) : 0.0f;
+    }
+    return 0.0f;
+}
+
+static uint64_t uintOrZero(JsonVariantConst v) {
+    if (v.isNull()) return 0;
+    if (v.is<uint64_t>()) return v.as<uint64_t>();
+    if (v.is<unsigned long>()) return (uint64_t)v.as<unsigned long>();
+    if (v.is<long>()) {
+        long n = v.as<long>();
+        return n > 0 ? (uint64_t)n : 0;
+    }
+    if (v.is<const char*>()) {
+        const char* s = v.as<const char*>();
+        return s ? strtoull(s, nullptr, 10) : 0;
+    }
+    return 0;
+}
+
+// Parse cost from data[].result[].amount (string in cents).
+// If bucketStart is provided, also returns that bucket's total via bucketTotal.
+static float parseCostResponse(const String& body,
+                               const char* bucketStart = nullptr,
+                               float* bucketTotal = nullptr) {
     JsonDocument doc;
     if (deserializeJson(doc, body) != DeserializationError::Ok) {
         Serial.println("[CLAUDE] JSON parse failed");
         return 0;
     }
     float total = 0;
+    float bucketDollars = 0;
     int count = 0;
-    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
-        for (JsonObject r : bucket["results"].as<JsonArray>()) {
-            total += readAmountDollars(r);
+    for (JsonObjectConst bucket : doc["data"].as<JsonArrayConst>()) {
+        const char* startingAt = bucket["starting_at"] | "";
+        bool matchesBucket = bucketStart && strcmp(startingAt, bucketStart) == 0;
+        JsonArrayConst rows = bucketResults(bucket);
+        if (rows.isNull()) {
+            Serial.println("[CLAUDE] Cost bucket missing result/results");
+            continue;
+        }
+        for (JsonObjectConst r : rows) {
+            // amount is a decimal string in cents, e.g. "123.45" = $1.2345
+            JsonVariantConst amount = r["amount"];
+            JsonObjectConst amountObj = amount.as<JsonObjectConst>();
+            float cents = amountObj.isNull() ? numOrStr(amount) : numOrStr(amountObj["value"]);
+            float dollars = cents / 100.0f;
+            total += dollars;
+            if (matchesBucket) bucketDollars += dollars;
             count++;
         }
     }
+    if (bucketTotal) *bucketTotal = bucketDollars;
     Serial.printf("[CLAUDE] Parsed %d cost entries, total=$%.4f\n", count, total);
     return total;
 }
 
-// Extract per-bucket cost totals (chronological, oldest → newest) for
-// the sparkline. Returns the number of buckets written into `out`.
-static int parseCostBuckets(const String& body, float* out, int maxBuckets) {
-    JsonDocument doc;
-    if (deserializeJson(doc, body) != DeserializationError::Ok) return 0;
-    int n = 0;
-    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
-        if (n >= maxBuckets) break;
-        float sum = 0;
-        for (JsonObject r : bucket["results"].as<JsonArray>()) {
-            sum += readAmountDollars(r);
-        }
-        out[n++] = sum;
-    }
-    return n;
-}
-
 // Estimate dollar cost from a usage_report response using Claude Sonnet 4
 // pricing (per 1M tokens, USD): input $3, output $15, cache_read $0.30,
-// cache_5m $3.75 (1.25× input), cache_1h $6 (2× input).
+// cache_5m $3.75 (1.25x input), cache_1h $6 (2x input).
 // Used for today's spend because cost_report excludes any in-progress day.
-// Locked to Sonnet 4 — heavy Opus usage will under-estimate.
 static float estimateSonnet4Cost(const String& body) {
     JsonDocument doc;
     if (deserializeJson(doc, body) != DeserializationError::Ok) return 0;
+
     double total = 0;
-    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
-        for (JsonObject r : bucket["results"].as<JsonArray>()) {
-            JsonObject cc = r["cache_creation"];
-            total += (double)(uint64_t)(r["uncached_input_tokens"]      | 0) * 3.00e-6;
-            total += (double)(uint64_t)(r["output_tokens"]              | 0) * 15.00e-6;
-            total += (double)(uint64_t)(r["cache_read_input_tokens"]    | 0) * 0.30e-6;
-            total += (double)(uint64_t)(cc["ephemeral_5m_input_tokens"] | 0) * 3.75e-6;
-            total += (double)(uint64_t)(cc["ephemeral_1h_input_tokens"] | 0) * 6.00e-6;
+    for (JsonObjectConst bucket : doc["data"].as<JsonArrayConst>()) {
+        JsonArrayConst rows = bucketResults(bucket);
+        if (rows.isNull()) continue;
+        for (JsonObjectConst r : rows) {
+            total += (double)uintOrZero(r["uncached_input_tokens"]) * 3.00e-6;
+            total += (double)uintOrZero(r["output_tokens"]) * 15.00e-6;
+            total += (double)uintOrZero(r["cache_read_input_tokens"]) * 0.30e-6;
+            total += (double)uintOrZero(r["cache_creation"]["ephemeral_5m_input_tokens"]) * 3.75e-6;
+            total += (double)uintOrZero(r["cache_creation"]["ephemeral_1h_input_tokens"]) * 6.00e-6;
         }
     }
     return (float)total;
 }
 
-// Parse tokens from data[].results[].
-// cache_creation is a nested object ({ephemeral_1h_input_tokens, ephemeral_5m_input_tokens}).
-// Leaving it out undercounts caching-heavy workloads like Claude Code.
+// Parse tokens from data[].result[].
 static uint64_t parseTokenResponse(const String& body) {
     JsonDocument doc;
     if (deserializeJson(doc, body) != DeserializationError::Ok) {
@@ -143,148 +167,120 @@ static uint64_t parseTokenResponse(const String& body) {
         return 0;
     }
     uint64_t total = 0;
-    for (JsonObject bucket : doc["data"].as<JsonArray>()) {
-        for (JsonObject r : bucket["results"].as<JsonArray>()) {
-            JsonObject cc = r["cache_creation"];
-            total += (uint64_t)(r["uncached_input_tokens"] | 0) +
-                     (uint64_t)(r["output_tokens"] | 0) +
-                     (uint64_t)(r["cache_read_input_tokens"] | 0) +
-                     (uint64_t)(cc["ephemeral_5m_input_tokens"] | 0) +
-                     (uint64_t)(cc["ephemeral_1h_input_tokens"] | 0);
+    int count = 0;
+    for (JsonObjectConst bucket : doc["data"].as<JsonArrayConst>()) {
+        JsonArrayConst rows = bucketResults(bucket);
+        if (rows.isNull()) {
+            Serial.println("[CLAUDE] Usage bucket missing result/results");
+            continue;
+        }
+        for (JsonObjectConst r : rows) {
+            uint64_t input = uintOrZero(r["uncached_input_tokens"]) +
+                             uintOrZero(r["cache_read_input_tokens"]) +
+                             uintOrZero(r["cache_creation_input_tokens"]) +
+                             uintOrZero(r["cache_creation"]["ephemeral_1h_input_tokens"]) +
+                             uintOrZero(r["cache_creation"]["ephemeral_5m_input_tokens"]);
+            if (input == 0) input = uintOrZero(r["input_tokens"]);
+            total += input + uintOrZero(r["output_tokens"]);
+            count++;
         }
     }
+    Serial.printf("[CLAUDE] Parsed %d token entries, total=%llu\n",
+        count, (unsigned long long)total);
     return total;
 }
 
 bool ClaudeUsageClient::fetch(const char* apiKey, UsageSnapshot& out) {
-    // NOTE: don't memset `out` here — the caller passes in the last known
-    // snapshot so that a transient failure on one of the four subqueries
-    // (e.g. today's cost) doesn't clobber the good values from a previous
-    // refresh with zeros.
+    UsageSnapshot prev = out;
+    memset(&out, 0, sizeof(out));
     bool gotData = false;
 
-    // Guard against querying the API before NTP sync completes. Without a
-    // real clock, starting_at ends up in 1970, which returns no data and
-    // silently cached zeros for the day.
-    time_t now_check = time(nullptr);
-    if (now_check < 1700000000) {   // ~2023-11-14; pre-NTP time is near 0
-        Serial.printf("[CLAUDE] Clock not synced (epoch=%ld) — skipping fetch\n",
-            (long)now_check);
-        return false;
-    }
-
-    char todayStart[32], tomorrowStart[32], monthStart[32];
+    char todayStart[32], endAt[32], monthStart[32];
     todayStartUTC(todayStart, sizeof(todayStart));
-    tomorrowStartUTC(tomorrowStart, sizeof(tomorrowStart));
+    nowUTC(endAt, sizeof(endAt));
     monthStartUTC(monthStart, sizeof(monthStart));
 
-    Serial.printf("[CLAUDE] Date range: today=%s tomorrow=%s month=%s\n",
-        todayStart, tomorrowStart, monthStart);
+    Serial.printf("[CLAUDE] Date range: today=%s end=%s month=%s\n",
+        todayStart, endAt, monthStart);
 
-    // Anthropic's cost_report ONLY supports bucket_width=1d (1h returns HTTP
-    // 400: "Input should be '1d'"), and 1d buckets exclude any in-progress
-    // day. So today's exact cost is unavailable from the Admin API. We
-    // estimate it from today's per-token-type usage using Sonnet 4 pricing
-    // (see estimateSonnet4Cost). Catches up exactly tomorrow when today
-    // rolls into past_days.
-
-    // ── Month cost (past days only) ──────────────────────────────
-    // Per-day buckets also drive the sparkline.
-    float past_days_cost = 0;
-    bool got_past_cost = false;
-    float dailyBuckets[SPARK_POINTS] = {0};
-    int dailyCount = 0;
+    // ── Month cost (past days) ───────────────────────────────────
+    // Anthropic cost_report only supports 1d buckets and excludes any
+    // in-progress day. Today's spend is estimated from hourly token usage.
+    bool gotMonthCost = false;
+    float pastMonthCost = prev.spend_month - prev.spend_today;
+    if (pastMonthCost < 0) pastMonthCost = prev.spend_month;
     {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.anthropic.com/v1/organizations/cost_report"
-            "?starting_at=%s&ending_at=%s&bucket_width=1d&limit=31",
-            monthStart, tomorrowStart);
+            "?starting_at=%s&ending_at=%s&limit=31&group_by%%5B%%5D=description",
+            monthStart, endAt);
 
         String body;
         if (apiGet(url, apiKey, body)) {
             gotData = true;
-            got_past_cost = true;
+            gotMonthCost = true;
             Serial.printf("[CLAUDE] Month cost raw: %.200s...\n", body.c_str());
-            past_days_cost = parseCostResponse(body);
-            dailyCount = parseCostBuckets(body, dailyBuckets, SPARK_POINTS);
+            pastMonthCost = parseCostResponse(body);
+            out.spend_today = prev.spend_today;
+            out.spend_month = pastMonthCost + out.spend_today;
+        } else {
+            out.spend_today = prev.spend_today;
+            out.spend_month = prev.spend_month;
         }
     }
 
-    // ── Today's tokens + cost estimate ───────────────────────────
-    // 1h buckets work for usage_report (unlike cost_report) and capture
-    // the in-progress day. We also compute a Sonnet-4 priced cost estimate
-    // from the same response since cost_report won't return today.
-    uint64_t today_tokens = out.tokens_today;   // seed with cached value
-    float    today_cost   = out.spend_today;    // seed with cached value
+    // ── Today's tokens ───────────────────────────────────────────
     {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.anthropic.com/v1/organizations/usage_report/messages"
-            "?starting_at=%s&ending_at=%s&bucket_width=1h&limit=24",
-            todayStart, tomorrowStart);
+            "?starting_at=%s&ending_at=%s&bucket_width=1h&limit=24&group_by%%5B%%5D=model",
+            todayStart, endAt);
 
         String body;
         if (apiGet(url, apiKey, body)) {
             gotData = true;
             Serial.printf("[CLAUDE] Today tokens raw: %.400s\n", body.c_str());
-            today_tokens = parseTokenResponse(body);
-            today_cost   = estimateSonnet4Cost(body);
-            out.tokens_today = today_tokens;
-            out.spend_today  = today_cost;
+            out.tokens_today = parseTokenResponse(body);
+            out.spend_today = estimateSonnet4Cost(body);
+            if (gotMonthCost) out.spend_month = pastMonthCost + out.spend_today;
             Serial.printf("[CLAUDE] tokens_today = %llu, est_cost = $%.4f (Sonnet 4)\n",
-                (unsigned long long)out.tokens_today, today_cost);
+                (unsigned long long)out.tokens_today, out.spend_today);
+        } else {
+            out.tokens_today = prev.tokens_today;
         }
     }
 
-    // ── Month tokens (past days) ─────────────────────────────────
-    // Without limit, usage_report defaults to 7 buckets for bucket_width=1d,
-    // silently truncating anything past day 7 of the month.
+    // ── Month tokens ─────────────────────────────────────────────
     {
         char url[256];
         snprintf(url, sizeof(url),
             "https://api.anthropic.com/v1/organizations/usage_report/messages"
-            "?starting_at=%s&ending_at=%s&bucket_width=1d&limit=31",
-            monthStart, tomorrowStart);
+            "?starting_at=%s&ending_at=%s&bucket_width=1d&limit=31&group_by%%5B%%5D=model",
+            monthStart, endAt);
 
         String body;
         if (apiGet(url, apiKey, body)) {
             gotData = true;
-            uint64_t past_days_tokens = parseTokenResponse(body);
-            out.tokens_month = past_days_tokens + today_tokens;
-            Serial.printf("[CLAUDE] tokens_month = %llu (past=%llu + today=%llu)\n",
-                (unsigned long long)out.tokens_month,
-                (unsigned long long)past_days_tokens,
-                (unsigned long long)today_tokens);
+            out.tokens_month = parseTokenResponse(body) + out.tokens_today;
+            Serial.printf("[CLAUDE] tokens_month = %llu\n", (unsigned long long)out.tokens_month);
+        } else {
+            out.tokens_month = prev.tokens_month;
         }
     }
 
-    // ── Combine month total ──────────────────────────────────────
-    // past_days_cost from cost_report (real, completed days) + today_cost
-    // estimated from Sonnet 4 token pricing.
-    if (got_past_cost) {
-        out.spend_month = past_days_cost + today_cost;
-        Serial.printf("[CLAUDE] Month: past_days=$%.4f + today_est=$%.4f = $%.4f\n",
-            past_days_cost, today_cost, out.spend_month);
-    }
+    // Build sparkline (distribute daily cost across elapsed hours)
+    time_t now = time(nullptr);
+    struct tm tn;
+    localtime_r(&now, &tn);
+    int hours_today = tn.tm_hour + 1;
+    float per_hour = (hours_today > 0) ? out.spend_today / hours_today : 0;
+    for (int i = 0; i < SPARK_POINTS; i++)
+        out.hourly_spend[i] = (i >= SPARK_POINTS - hours_today) ? per_hour : 0;
 
-    // Build sparkline from the per-day cost buckets we already fetched
-    // for the month. Right-align so the newest day sits at the right edge;
-    // leading slots are zero until there is enough history to fill.
-    // Overlay today's actual cost on the last slot — the 1d response either
-    // omits today or returns an empty bucket for it.
-    for (int i = 0; i < SPARK_POINTS; i++) out.hourly_spend[i] = 0;
-    if (dailyCount > 0) {
-        int copy = dailyCount < SPARK_POINTS ? dailyCount : SPARK_POINTS;
-        for (int i = 0; i < copy; i++) {
-            out.hourly_spend[SPARK_POINTS - copy + i] =
-                dailyBuckets[dailyCount - copy + i];
-        }
-    }
-    out.hourly_spend[SPARK_POINTS - 1] = today_cost;
-
-    out.last_updated = time(nullptr);
-    out.valid = gotData;
+    out.last_updated = gotData ? time(nullptr) : prev.last_updated;
+    out.valid = gotData || prev.valid;
     Serial.printf("[CLAUDE] FINAL: today=$%.4f month=$%.4f tok_today=%llu tok_month=%llu valid=%d\n",
         out.spend_today, out.spend_month,
         (unsigned long long)out.tokens_today, (unsigned long long)out.tokens_month,

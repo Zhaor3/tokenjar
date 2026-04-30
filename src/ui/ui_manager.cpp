@@ -6,6 +6,8 @@
 #include "ui/screen_plan.h"
 #include "ui/screen_plan_h.h"
 #include "ui/i_screen_plan.h"
+#include "ui/screen_codex_plan.h"
+#include "ui/i_screen_codex_plan.h"
 #include "storage/settings_store.h"
 #include "config.h"
 #include "theme.h"
@@ -26,46 +28,89 @@ static IScreenPlan* makePlanScreen(bool horizontal) {
     return new ScreenPlan();
 }
 
+static IScreenCodexPlan* makeCodexPlanScreen(bool horizontal) {
+    return new ScreenCodexPlan(horizontal);
+}
+
+static const char* modeName(Mode m) {
+    switch (m) {
+        case Mode::CLAUDE:      return "CLAUDE";
+        case Mode::CLAUDE_PLAN: return "CLAUDE_PLAN";
+        case Mode::OPENAI:      return "OPENAI";
+        case Mode::CODEX_PLAN:  return "OPENAI_SESSION";
+        case Mode::SETTINGS:    return "SETTINGS";
+        default:                return "?";
+    }
+}
+
 void UIManager::init(SettingsStore& store, bool horizontal) {
     horizontal_ = horizontal;
-    bool has_c    = store.hasClaude();
-    bool has_o    = store.hasOpenAI();
-    bool has_plan = store.hasClaudeSession();
-    num_modes_ = 0;
+    ensureScreens(store);
+    rebuildModes(store, Mode::_COUNT);
 
-    // One screen per provider. Timeframe is controlled by rotation,
-    // not by having separate Today / Month screens.
-    if (has_c) {
-        scr_claude_ = makeProviderScreen(horizontal, "CLAUDE", Color::claude());
-        modes_[num_modes_++] = Mode::CLAUDE;
-    }
-    if (has_plan) {
-        scr_claude_plan_ = makePlanScreen(horizontal);
-        modes_[num_modes_++] = Mode::CLAUDE_PLAN;
-    }
-    if (has_o) {
-        scr_openai_ = makeProviderScreen(horizontal, "OPENAI", Color::openai());
-        modes_[num_modes_++] = Mode::OPENAI;
-    }
-
-    scr_settings_ = horizontal
-        ? static_cast<IScreenSettings*>(new ScreenSettingsH())
-        : static_cast<IScreenSettings*>(new ScreenSettings());
-    modes_[num_modes_++] = Mode::SETTINGS;
-
-    // Seed the active timeframe from the user's saved default.
-    timeframe_ = store.defaultTimeframe();
-
-    cur_idx_   = 0;
     bl_target_ = BL_FULL;
     bl_current_= BL_FULL;
     last_act_  = millis();
     analogWrite(PIN_TFT_BL, BL_FULL);
 
     if (num_modes_ > 0) {
-        lv_obj_t* first = screenForMode(modes_[0]);
+        lv_obj_t* first = screenForMode(modes_[cur_idx_]);
         if (first) lv_screen_load(first);
     }
+}
+
+void UIManager::ensureScreens(SettingsStore& store) {
+    // Build screens lazily so a user can add providers later through the
+    // runtime settings portal without rebooting or factory-resetting.
+    if (store.hasClaude() && !scr_claude_) {
+        scr_claude_ = makeProviderScreen(horizontal_, "CLAUDE", Color::claude());
+    }
+    if (store.hasClaudeSession() && !scr_claude_plan_) {
+        scr_claude_plan_ = makePlanScreen(horizontal_);
+    }
+    if (store.hasOpenAI() && !scr_openai_) {
+        scr_openai_ = makeProviderScreen(horizontal_, "OPENAI", Color::openai());
+    }
+    if ((store.hasCodex() || store.hasOpenAI()) && !scr_codex_plan_) {
+        scr_codex_plan_ = makeCodexPlanScreen(horizontal_);
+    }
+    if (!scr_settings_) {
+        scr_settings_ = horizontal_
+            ? static_cast<IScreenSettings*>(new ScreenSettingsH())
+            : static_cast<IScreenSettings*>(new ScreenSettings());
+    }
+}
+
+void UIManager::rebuildModes(SettingsStore& store, Mode preferred) {
+    num_modes_ = 0;
+
+    if (store.hasClaude())        modes_[num_modes_++] = Mode::CLAUDE;
+    if (store.hasClaudeSession()) modes_[num_modes_++] = Mode::CLAUDE_PLAN;
+    if (store.hasOpenAI())        modes_[num_modes_++] = Mode::OPENAI;
+    if (store.hasCodex() || store.hasOpenAI()) modes_[num_modes_++] = Mode::CODEX_PLAN;
+    modes_[num_modes_++] = Mode::SETTINGS;
+
+    cur_idx_ = 0;
+    for (int i = 0; i < num_modes_; ++i) {
+        if (modes_[i] == preferred) {
+            cur_idx_ = i;
+            break;
+        }
+    }
+
+    Serial.print("[UI] Modes:");
+    for (int i = 0; i < num_modes_; ++i) {
+        Serial.print(i == 0 ? " " : ", ");
+        Serial.print(modeName(modes_[i]));
+    }
+    Serial.println();
+}
+
+void UIManager::refreshModes(SettingsStore& store) {
+    Mode old = currentMode();
+    ensureScreens(store);
+    rebuildModes(store, old);
+    transitionTo(cur_idx_);
 }
 
 // ── Screen lookup ────────────────────────────────────────────────
@@ -75,6 +120,7 @@ lv_obj_t* UIManager::screenForMode(Mode m) {
         case Mode::CLAUDE:      return scr_claude_      ? scr_claude_->screen()      : nullptr;
         case Mode::CLAUDE_PLAN: return scr_claude_plan_ ? scr_claude_plan_->screen() : nullptr;
         case Mode::OPENAI:      return scr_openai_      ? scr_openai_->screen()      : nullptr;
+        case Mode::CODEX_PLAN:  return scr_codex_plan_  ? scr_codex_plan_->screen()  : nullptr;
         case Mode::SETTINGS:    return scr_settings_    ? scr_settings_->screen()    : nullptr;
         default: return nullptr;
     }
@@ -115,6 +161,11 @@ void UIManager::adjustTimeframe(int delta) {
     timeframe_ = (Timeframe)tf;
 }
 
+void UIManager::setTimeframe(Timeframe tf) {
+    if (tf >= Timeframe::_COUNT) return;
+    timeframe_ = tf;
+}
+
 // ── Data push ────────────────────────────────────────────────────
 
 void UIManager::updateData(const UsageSnapshot& claude,
@@ -138,6 +189,10 @@ void UIManager::updatePlan(const ClaudePlanSnapshot& plan) {
     if (scr_claude_plan_) scr_claude_plan_->update(plan);
 }
 
+void UIManager::updateCodexPlan(const CodexPlanSnapshot& plan) {
+    if (scr_codex_plan_) scr_codex_plan_->update(plan);
+}
+
 // ── Clock refresh (called every loop) ────────────────────────────
 
 void UIManager::tick() {
@@ -149,6 +204,7 @@ void UIManager::tick() {
     if (scr_claude_)      scr_claude_->refreshClock();
     if (scr_claude_plan_) scr_claude_plan_->refreshClock();
     if (scr_openai_)      scr_openai_->refreshClock();
+    if (scr_codex_plan_)  scr_codex_plan_->refreshClock();
     if (scr_settings_)    scr_settings_->refreshClock();
 }
 
@@ -308,6 +364,40 @@ lv_obj_t* UIManager::makeSyncing() {
     return scr;
 }
 
+lv_obj_t* UIManager::makeConfigPortal(const char* url) {
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, Color::bg(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t* title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, Font::label(), 0);
+    lv_obj_set_style_text_color(title, Color::openai(), 0);
+    lv_obj_set_style_text_letter_space(title, 3, 0);
+    lv_label_set_text(title, "API PORTAL");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 42);
+
+    lv_obj_t* line1 = lv_label_create(scr);
+    lv_obj_set_style_text_font(line1, Font::label(), 0);
+    lv_obj_set_style_text_color(line1, Color::dim(), 0);
+    lv_label_set_text(line1, "OPEN IN BROWSER");
+    lv_obj_align(line1, LV_ALIGN_CENTER, 0, -8);
+
+    lv_obj_t* addr = lv_label_create(scr);
+    lv_obj_set_style_text_font(addr, Font::body(), 0);
+    lv_obj_set_style_text_color(addr, Color::text(), 0);
+    lv_label_set_text(addr, url && *url ? url : "tokenjar.local");
+    lv_obj_align(addr, LV_ALIGN_CENTER, 0, 18);
+
+    lv_obj_t* hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(hint, Font::small(), 0);
+    lv_obj_set_style_text_color(hint, Color::vdim(), 0);
+    lv_label_set_text(hint, "LONG-PRESS TO CLOSE");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    return scr;
+}
+
 // ── Orientation choice screen (first boot) ───────────────────────
 // Small static state so the caller can drive selection via encoder.
 static lv_obj_t* s_orient_lbl_h = nullptr;
@@ -448,51 +538,45 @@ bool UIManager::resetConfirmGetSel() {
     return s_reset_sel_yes;
 }
 
-// ── Settings menu screen ─────────────────────────────────────────
-// Three-row menu: DEFAULT PAGE, FACTORY RESET, BACK.
-// Rotation moves between rows when not editing, or cycles timeframes when
-// editing the DEFAULT PAGE row. Click either enters/exits edit mode on
-// the timeframe row, or emits an action (FACTORY_RESET / BACK) for the
-// caller to react to.
-static constexpr int SM_ROW_DEFAULT_TF  = 0;
-static constexpr int SM_ROW_RESET       = 1;
-static constexpr int SM_ROW_BACK        = 2;
-static constexpr int SM_NUM_ROWS        = 3;
+// ── Long-press action menu ───────────────────────────────────────
+static lv_obj_t* s_settings_lbl_main   = nullptr;
+static lv_obj_t* s_settings_lbl_api    = nullptr;
+static lv_obj_t* s_settings_lbl_reset  = nullptr;
+static lv_obj_t* s_settings_lbl_cancel = nullptr;
+static SettingsMenuSelection s_settings_sel = SettingsMenuSelection::MAIN_PAGE;
 
-static lv_obj_t* s_sm_labels[SM_NUM_ROWS] = { nullptr, nullptr, nullptr };
-static lv_obj_t* s_sm_tf_value = nullptr;    // current-value text on row 0
-static int       s_sm_sel_row  = 0;
-static bool      s_sm_editing  = false;
-static Timeframe s_sm_tf       = Timeframe::H24;
+static void renderSettingsMenu() {
+    if (!s_settings_lbl_main || !s_settings_lbl_api ||
+        !s_settings_lbl_reset || !s_settings_lbl_cancel) return;
 
-static const char* s_sm_row_labels[SM_NUM_ROWS] = {
-    "DEFAULT PAGE",
-    "FACTORY RESET",
-    "BACK",
-};
+    auto paint = [](lv_obj_t* lbl, bool selected, const char* text) {
+        char buf[32];
+        snprintf(buf, sizeof(buf), selected ? ">  %s  <" : "   %s", text);
+        lv_label_set_text(lbl, buf);
+        lv_obj_set_style_text_color(lbl, selected ? Color::openai() : Color::dim(), 0);
+    };
 
-static void settingsMenuRender() {
-    if (!s_sm_labels[0]) return;
-    for (int i = 0; i < SM_NUM_ROWS; i++) {
-        char buf[48];
-        bool sel = (i == s_sm_sel_row);
-        const char* marker = sel ? (s_sm_editing ? "*" : ">") : " ";
-        snprintf(buf, sizeof(buf), "%s  %s", marker, s_sm_row_labels[i]);
-        lv_label_set_text(s_sm_labels[i], buf);
-        lv_obj_set_style_text_color(s_sm_labels[i],
-            sel ? Color::claude() : Color::dim(), 0);
-    }
-    if (s_sm_tf_value) {
-        lv_label_set_text(s_sm_tf_value, timeframeLabel(s_sm_tf));
-        lv_obj_set_style_text_color(s_sm_tf_value,
-            s_sm_editing ? Color::claude() : Color::text(), 0);
-    }
+    paint(s_settings_lbl_main,
+          s_settings_sel == SettingsMenuSelection::MAIN_PAGE,
+          "MAIN PAGE");
+    paint(s_settings_lbl_api,
+          s_settings_sel == SettingsMenuSelection::API_PORTAL,
+          "CHANGE API KEY");
+    paint(s_settings_lbl_reset,
+          s_settings_sel == SettingsMenuSelection::RESET,
+          "RESET");
+    paint(s_settings_lbl_cancel,
+          s_settings_sel == SettingsMenuSelection::CANCEL,
+          "CANCEL");
+
+    lv_obj_align(s_settings_lbl_main,   LV_ALIGN_CENTER, 0, -42);
+    lv_obj_align(s_settings_lbl_api,    LV_ALIGN_CENTER, 0, -14);
+    lv_obj_align(s_settings_lbl_reset,  LV_ALIGN_CENTER, 0,  14);
+    lv_obj_align(s_settings_lbl_cancel, LV_ALIGN_CENTER, 0,  42);
 }
 
-lv_obj_t* UIManager::makeSettingsMenu(Timeframe initialDefault) {
-    s_sm_sel_row = 0;
-    s_sm_editing = false;
-    s_sm_tf      = initialDefault;
+lv_obj_t* UIManager::makeSettingsMenu() {
+    s_settings_sel = SettingsMenuSelection::MAIN_PAGE;
 
     lv_obj_t* scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr, Color::bg(), 0);
@@ -501,69 +585,119 @@ lv_obj_t* UIManager::makeSettingsMenu(Timeframe initialDefault) {
 
     lv_obj_t* title = lv_label_create(scr);
     lv_obj_set_style_text_font(title, Font::label(), 0);
-    lv_obj_set_style_text_color(title, Color::dim(), 0);
+    lv_obj_set_style_text_color(title, Color::openai(), 0);
     lv_obj_set_style_text_letter_space(title, 3, 0);
-    lv_label_set_text(title, "SETTINGS");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_label_set_text(title, "MENU");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 24);
 
-    // Three rows, vertically stacked near center.
-    int y_offsets[SM_NUM_ROWS] = { -34, -6, 22 };
-    for (int i = 0; i < SM_NUM_ROWS; i++) {
-        s_sm_labels[i] = lv_label_create(scr);
-        lv_obj_set_style_text_font(s_sm_labels[i], Font::label(), 0);
-        lv_obj_set_style_text_letter_space(s_sm_labels[i], 2, 0);
-        lv_obj_align(s_sm_labels[i], LV_ALIGN_CENTER, -40, y_offsets[i]);
-    }
+    s_settings_lbl_main = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_settings_lbl_main, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_settings_lbl_main, 3, 0);
 
-    // Current-timeframe value shown to the right of the DEFAULT PAGE row.
-    s_sm_tf_value = lv_label_create(scr);
-    lv_obj_set_style_text_font(s_sm_tf_value, Font::label(), 0);
-    lv_obj_set_style_text_letter_space(s_sm_tf_value, 2, 0);
-    lv_obj_align(s_sm_tf_value, LV_ALIGN_CENTER, 60, y_offsets[SM_ROW_DEFAULT_TF]);
+    s_settings_lbl_api = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_settings_lbl_api, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_settings_lbl_api, 3, 0);
+
+    s_settings_lbl_reset = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_settings_lbl_reset, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_settings_lbl_reset, 3, 0);
+
+    s_settings_lbl_cancel = lv_label_create(scr);
+    lv_obj_set_style_text_font(s_settings_lbl_cancel, Font::body(), 0);
+    lv_obj_set_style_text_letter_space(s_settings_lbl_cancel, 3, 0);
 
     lv_obj_t* hint = lv_label_create(scr);
     lv_obj_set_style_text_font(hint, Font::small(), 0);
     lv_obj_set_style_text_color(hint, Color::vdim(), 0);
-    lv_label_set_text(hint, "TURN TO NAVIGATE  *  CLICK TO SELECT");
+    lv_label_set_text(hint, "TURN TO CHANGE  *  CLICK TO CONFIRM");
     lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
 
-    settingsMenuRender();
+    renderSettingsMenu();
     return scr;
 }
 
-void UIManager::settingsMenuRotate(int delta) {
-    if (delta == 0) return;
-    int step = (delta > 0) ? 1 : -1;
-    int n    = (delta > 0) ? delta : -delta;
-
-    if (s_sm_editing) {
-        int v = (int)s_sm_tf;
-        int mx = (int)Timeframe::_COUNT;
-        for (int i = 0; i < n; i++) {
-            v = (v + step + mx) % mx;
-        }
-        s_sm_tf = (Timeframe)v;
-    } else {
-        for (int i = 0; i < n; i++) {
-            s_sm_sel_row = (s_sm_sel_row + step + SM_NUM_ROWS) % SM_NUM_ROWS;
-        }
+void UIManager::settingsMenuMove(int delta) {
+    int idx = 0;
+    switch (s_settings_sel) {
+        case SettingsMenuSelection::MAIN_PAGE:  idx = 0; break;
+        case SettingsMenuSelection::API_PORTAL: idx = 1; break;
+        case SettingsMenuSelection::RESET:      idx = 2; break;
+        case SettingsMenuSelection::CANCEL:     idx = 3; break;
     }
-    settingsMenuRender();
+
+    idx += (delta > 0) ? 1 : -1;
+    if (idx < 0) idx = 3;
+    if (idx > 3) idx = 0;
+
+    s_settings_sel = (idx == 0) ? SettingsMenuSelection::MAIN_PAGE :
+                     (idx == 1) ? SettingsMenuSelection::API_PORTAL :
+                     (idx == 2) ? SettingsMenuSelection::RESET :
+                                  SettingsMenuSelection::CANCEL;
+    renderSettingsMenu();
 }
 
-UIManager::SettingsMenuAction UIManager::settingsMenuClick() {
-    if (s_sm_sel_row == SM_ROW_DEFAULT_TF) {
-        // Toggle edit mode. Returning CHANGE_DEFAULT_TF lets the caller
-        // persist the value whenever the user exits edit mode.
-        bool wasEditing = s_sm_editing;
-        s_sm_editing = !s_sm_editing;
-        settingsMenuRender();
-        return wasEditing ? SettingsMenuAction::CHANGE_DEFAULT_TF
-                          : SettingsMenuAction::NONE;
-    }
-    if (s_sm_sel_row == SM_ROW_RESET) return SettingsMenuAction::FACTORY_RESET;
-    if (s_sm_sel_row == SM_ROW_BACK)  return SettingsMenuAction::BACK;
-    return SettingsMenuAction::NONE;
+SettingsMenuSelection UIManager::settingsMenuGetSel() {
+    return s_settings_sel;
 }
 
-Timeframe UIManager::settingsMenuTimeframe() { return s_sm_tf; }
+// ── Main page / timeframe picker ─────────────────────────────────
+static lv_obj_t* s_main_lbls[(int)Timeframe::_COUNT] = {};
+static Timeframe s_main_sel = Timeframe::D30;
+
+static void renderMainPageMenu() {
+    for (int i = 0; i < (int)Timeframe::_COUNT; ++i) {
+        lv_obj_t* lbl = s_main_lbls[i];
+        if (!lbl) continue;
+        bool selected = (i == (int)s_main_sel);
+        char buf[28];
+        snprintf(buf, sizeof(buf), selected ? ">  %s  <" : "   %s",
+                 timeframeLabel((Timeframe)i));
+        lv_label_set_text(lbl, buf);
+        lv_obj_set_style_text_color(lbl, selected ? Color::openai() : Color::dim(), 0);
+        lv_obj_align(lbl, LV_ALIGN_CENTER, 0, -54 + i * 27);
+    }
+}
+
+lv_obj_t* UIManager::makeMainPageMenu(Timeframe current) {
+    s_main_sel = (current < Timeframe::_COUNT) ? current : Timeframe::D30;
+
+    lv_obj_t* scr = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr, Color::bg(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
+
+    lv_obj_t* title = lv_label_create(scr);
+    lv_obj_set_style_text_font(title, Font::label(), 0);
+    lv_obj_set_style_text_color(title, Color::openai(), 0);
+    lv_obj_set_style_text_letter_space(title, 3, 0);
+    lv_label_set_text(title, "MAIN PAGE");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+    for (int i = 0; i < (int)Timeframe::_COUNT; ++i) {
+        s_main_lbls[i] = lv_label_create(scr);
+        lv_obj_set_style_text_font(s_main_lbls[i], Font::body(), 0);
+        lv_obj_set_style_text_letter_space(s_main_lbls[i], 3, 0);
+    }
+
+    lv_obj_t* hint = lv_label_create(scr);
+    lv_obj_set_style_text_font(hint, Font::small(), 0);
+    lv_obj_set_style_text_color(hint, Color::vdim(), 0);
+    lv_label_set_text(hint, "TURN TO CHANGE  *  CLICK TO CONFIRM");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -20);
+
+    renderMainPageMenu();
+    return scr;
+}
+
+void UIManager::mainPageMenuMove(int delta) {
+    int idx = (int)s_main_sel + ((delta > 0) ? 1 : -1);
+    int mx = (int)Timeframe::_COUNT;
+    if (idx < 0) idx = mx - 1;
+    if (idx >= mx) idx = 0;
+    s_main_sel = (Timeframe)idx;
+    renderMainPageMenu();
+}
+
+Timeframe UIManager::mainPageMenuGetSel() {
+    return s_main_sel;
+}

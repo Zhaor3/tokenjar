@@ -19,6 +19,17 @@ String SettingsStore::openaiKey()  { return prefs_.getString("openai_key", ""); 
 bool   SettingsStore::hasClaude()  { return claudeKey().length() > 0; }
 bool   SettingsStore::hasOpenAI()  { return openaiKey().length() > 0; }
 
+// ── Codex / ChatGPT OAuth session ────────────────────────────────
+void   SettingsStore::setCodexAccessToken(const String& k) { prefs_.putString("codex_acc", k); }
+void   SettingsStore::setCodexRefreshToken(const String& k) { prefs_.putString("codex_ref", k); }
+void   SettingsStore::setCodexAccountId(const String& id) { prefs_.putString("codex_acct", id); }
+String SettingsStore::codexAccessToken()  { return prefs_.getString("codex_acc", ""); }
+String SettingsStore::codexRefreshToken() { return prefs_.getString("codex_ref", ""); }
+String SettingsStore::codexAccountId()    { return prefs_.getString("codex_acct", ""); }
+bool   SettingsStore::hasCodex() {
+    return codexAccessToken().length() > 0 || codexRefreshToken().length() > 0;
+}
+
 // ── Claude.ai session cookie (plan tracking) ─────────────────────
 // Separate from the Admin API key. When this is set, TokenJar scrapes
 // the claude.ai subscription usage page instead of the Admin API for
@@ -47,6 +58,18 @@ float SettingsStore::openaiMonthly() { return prefs_.getFloat("openai_m_bud", DE
 // ── Timezone ─────────────────────────────────────────────────────
 void   SettingsStore::setTimezone(const String& tz) { prefs_.putString("timezone", tz); }
 String SettingsStore::timezone() { return prefs_.getString("timezone", DEFAULT_TZ); }
+
+// ── Main API usage timeframe ─────────────────────────────────────
+void SettingsStore::setTimeframe(Timeframe tf) {
+    if (tf >= Timeframe::_COUNT) return;
+    prefs_.putUChar("timeframe", (uint8_t)tf);
+}
+
+Timeframe SettingsStore::timeframe() {
+    uint8_t tf = prefs_.getUChar("timeframe", (uint8_t)Timeframe::D30);
+    if (tf >= (uint8_t)Timeframe::_COUNT) return Timeframe::D30;
+    return (Timeframe)tf;
+}
 
 // ── OTA ──────────────────────────────────────────────────────────
 void   SettingsStore::setOTAPass(const String& p) { prefs_.putString("ota_pass", p); }
@@ -93,6 +116,14 @@ void SettingsStore::savePlanCache(const ClaudePlanSnapshot& s) {
 
 bool SettingsStore::loadPlanCache(ClaudePlanSnapshot& s) {
     return prefs_.getBytes("plan_c", &s, sizeof(s)) == sizeof(s);
+}
+
+void SettingsStore::saveCodexCache(const CodexPlanSnapshot& s) {
+    prefs_.putBytes("codex_c", &s, sizeof(s));
+}
+
+bool SettingsStore::loadCodexCache(CodexPlanSnapshot& s) {
+    return prefs_.getBytes("codex_c", &s, sizeof(s)) == sizeof(s);
 }
 
 void SettingsStore::clear() { prefs_.clear(); }

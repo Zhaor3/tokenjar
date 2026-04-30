@@ -4,7 +4,7 @@
 
 **A tiny desk gadget that tracks your AI API spending in real time.**
 
-Claude Admin API &bull; OpenAI Admin API &bull; Claude.ai Pro/Max Plan Usage
+Claude Admin API &bull; OpenAI Admin API &bull; Claude.ai Pro/Max Plan Usage &bull; OpenAI Session Usage
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32--S3-orange?logo=platformio)](https://platformio.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -28,18 +28,21 @@ You're burning through API credits across Claude and OpenAI — Cursor, Copilot,
 | **Anthropic Admin API** | Spend today/month, tokens, 24h sparkline, budget % | `sk-ant-admin...` key |
 | **OpenAI Admin API** | Spend today/month, tokens, 24h sparkline, budget % | `sk-admin-...` key |
 | **Claude.ai Subscription** | 5h session %, weekly limit %, Opus/Sonnet split, extra usage $ | Session cookie |
+| **OpenAI Session / ChatGPT** | 5h session %, weekly limit %, model/code-review caps | Codex OAuth tokens |
 
-> **Each provider is optional.** Configure just Claude, just OpenAI, just the session cookie, or all three. TokenJar adapts the screen ring automatically.
+> **Each provider is optional.** Configure just Claude, just OpenAI, session-cookie plan tracking, OpenAI session tracking, or any mix. TokenJar adapts the screen ring automatically.
 
 ---
 
 ## Features
 
-- **Real-time cost tracking** — refreshes every 60 seconds (Admin API) / 5 minutes (Claude.ai plan)
+- **Real-time cost tracking** — refreshes every 60 seconds (Admin API) / 5 minutes (subscription plans)
 - **Any interaction refreshes data** — spin or press the encoder and data updates immediately
-- **Multiple timeframes** — rotate the encoder to switch between 1h / 6h / Today / 7d / 30d views
+- **Multiple timeframes** — rotate the encoder to switch between 1h / 6h / Today / 7d / 30d views; the selected view is saved
 - **Budget progress bars** — set daily and monthly limits, see how close you are at a glance
 - **Claude.ai Pro/Max plan screen** — 5-hour session usage, weekly cap, Opus vs Sonnet breakdown, extra usage dollars
+- **OpenAI session screen** — ChatGPT/Codex 5-hour and 7-day usage, plus model/code-review caps when present
+- **Runtime API portal** — long-press Settings to add or change credentials without factory reset
 - **Session cookie auto-refresh** — the device captures renewed cookies from `Set-Cookie` headers automatically
 - **Horizontal or vertical** — choose your orientation on first boot; the UI adapts
 - **QR code setup portal** — connect to the device's WiFi, scan the QR, configure everything from your browser
@@ -154,6 +157,7 @@ pio run -t upload
    - **Anthropic Admin API key** (optional)
    - **OpenAI Admin API key** (optional)
    - **Claude.ai session cookie** (optional — for Pro/Max plan tracking)
+   - **Codex / ChatGPT OAuth tokens** (optional — for Codex plan tracking)
    - Daily / monthly budgets
    - Timezone
 5. Click **Save & Reboot**.
@@ -197,6 +201,27 @@ The cookie auto-renews via `Set-Cookie` headers, so you typically only need to p
 
 </details>
 
+<details>
+<summary><b>Codex / ChatGPT OAuth Tokens (for Codex plan tracking)</b></summary>
+
+This tracks your **Codex subscription usage** (5-hour session window, 7-day weekly window, and optional model/code-review limits). It is separate from the OpenAI Admin API key.
+
+1. Run Codex CLI/App and sign in with your ChatGPT account.
+2. Open `~/.codex/auth.json` on the machine where Codex is logged in.
+3. In the setup portal, paste the whole file into **Paste Codex auth.json**.
+
+You can also paste fields manually:
+
+- `tokens.access_token` into **OpenAI Session Access Token**
+- `tokens.refresh_token` into **OpenAI Session Refresh Token**
+- `tokens.account_id` into **ChatGPT Account ID** if present
+
+The access token expires regularly. TokenJar uses the refresh token to renew it automatically.
+
+> OpenAI Session is **not** the same as the OpenAI Admin API. Do not paste an `sk-*` API key into the OpenAI Session fields.
+
+</details>
+
 ---
 
 ## Usage
@@ -205,7 +230,7 @@ The cookie auto-renews via `Set-Cookie` headers, so you typically only need to p
 |--------|--------|
 | **Press** encoder | Next screen + refresh all data |
 | **Rotate** encoder | Change timeframe (1h / 6h / Today / 7d / 30d) + refresh all data |
-| **Long press** (>1s) | Open factory-reset prompt — rotate to pick `NO`/`YES`, click to confirm (or long-press again to cancel) |
+| **Long press** (>1s) | Open action menu: Main Page, Change API Key, Reset, Cancel |
 
 ### Screens
 
@@ -214,6 +239,7 @@ The cookie auto-renews via `Set-Cookie` headers, so you typically only need to p
 | **Claude** | Admin API spend, tokens, sparkline, budget bar (timeframe via rotation) |
 | **Claude Plan** | 5h session %, weekly limit %, Opus/Sonnet split, extra usage $ |
 | **OpenAI** | Admin API spend, tokens, sparkline, budget bar (timeframe via rotation) |
+| **OpenAI Session** | 5h ChatGPT/Codex session %, weekly limit %, model/code-review caps |
 | **Settings** | WiFi status, IP address, free heap, uptime |
 
 Only screens for configured providers appear. If you only set up Claude, you'll only see Claude screens.
@@ -284,6 +310,7 @@ The device advertises via mDNS as `tokenjar.local`.
                    |  task   |       - Claude Admin API (60s)
                    +--------+       - OpenAI Admin API (60s)
                        |            - Claude.ai scraper (5min)
+                       |            - Codex / ChatGPT usage (5min)
                        v
                    NVS Flash
                    (settings, cache)
@@ -292,6 +319,8 @@ The device advertises via mDNS as `tokenjar.local`.
 **Admin APIs** — standard REST calls with admin keys. Fetches cost reports and usage data.
 
 **Claude.ai Plan** — scrapes undocumented `claude.ai/api/organizations/{id}/usage` endpoints using a session cookie with Chrome-mimicking headers to pass Cloudflare. Extracts 5-hour session utilization, 7-day weekly limits, per-model breakdown, and overage billing.
+
+**Codex / ChatGPT Plan** — reads the undocumented ChatGPT Codex usage endpoint with Codex OAuth tokens. Extracts 5-hour session utilization, 7-day weekly limits, and optional model/code-review limits.
 
 **Data flow** — the API task on Core 0 fetches data and writes it to shared snapshots under a mutex. The main loop on Core 1 consumes the data and pushes it to LVGL screens. Any encoder interaction also wakes the API task for an immediate refresh.
 
@@ -306,11 +335,13 @@ The device advertises via mDNS as `tokenjar.local`.
 |---------|-----|
 | **Blank / white screen** | Check SPI wiring. Ensure `USE_FSPI_PORT` is in `build_flags` (critical for ESP32-S3). |
 | **Colors wrong** | Toggle `-DTFT_INVERSION_ON` / `OFF` and check `-DTFT_RGB_ORDER=0` in `platformio.ini`. |
-| **"$0.00" on all screens** | Your key must be an **Admin** key, not a regular API key. Also: $0 is correct if you haven't made API calls today. |
+| **"$0.00" on Admin API screens** | Your key must be an **Admin** key, not a regular API key. Admin API screens track API organization usage, not Claude.ai/ChatGPT web subscription usage. Rotate or choose **30 DAYS** if today's API usage is zero. |
 | **Portal page won't load** | Connect to `tokenjar-setup` WiFi, open `http://192.168.4.1` directly. Use a **computer** — phones may disconnect due to "no internet" detection. |
 | **WiFi keeps disconnecting during setup** | Use a computer instead of a phone. Fill in all fields first, then Save & Reboot in one go. |
 | **Claude Plan shows "AUTH EXPIRED"** | Your session cookie expired. Grab a fresh one from claude.ai DevTools and re-enter it via the portal. |
 | **Claude Plan shows "CF BLOCKED"** | Cloudflare is challenging the request. Usually temporary — wait 5 minutes and it auto-retries. |
+| **OpenAI Session shows "AUTH EXPIRED"** | Paste a fresh `~/.codex/auth.json` from a currently signed-in Codex CLI/App session. |
+| **OpenAI Session shows "NOT API KEY"** | The OpenAI Session page needs Codex/ChatGPT OAuth tokens, not an `sk-*` OpenAI Platform API key. |
 | **WiFi connect timeout** | Device falls back to cached data after 30s. Long-press to re-enter setup. |
 | **OTA upload fails** | Check OTA password matches. Device must be on the same local network. |
 | **Build fails "no space"** | Current build uses ~32% of 4 MB flash. Disable unused fonts in `platformio.ini` if needed. |
@@ -337,6 +368,8 @@ Anthropic:
 OpenAI:
   GET /v1/organization/costs?start_time=<unix>&limit=31
   GET /v1/organization/usage/completions?start_time=<unix>&limit=31
+  GET /v1/organization/usage/embeddings?start_time=<unix>&limit=31
+  GET /v1/organization/usage/moderations?start_time=<unix>&limit=31
 ```
 
 **Claude.ai Plan (undocumented, reverse-engineered):**
@@ -344,6 +377,12 @@ OpenAI:
 GET https://claude.ai/api/organizations
 GET https://claude.ai/api/organizations/{uuid}/usage
 GET https://claude.ai/api/organizations/{uuid}/overage_spend_limit
+```
+
+**Codex / ChatGPT Plan (undocumented, reverse-engineered):**
+```
+GET  https://chatgpt.com/backend-api/codex/usage
+POST https://auth.openai.com/oauth/token
 ```
 
 </details>
@@ -363,6 +402,8 @@ tokenjar/
       openai_client.cpp/h     # OpenAI Admin API client
       claude_web_client.cpp/h # Claude.ai session scraper
       claude_plan.h           # Plan snapshot data struct
+      openai_session_client.cpp/h # Codex / ChatGPT usage client
+      codex_plan.h            # Codex plan snapshot data struct
       usage_provider.h        # Usage snapshot + timeframe types
     storage/
       settings_store.cpp/h    # NVS persistence (WiFi, keys, cache)
@@ -374,10 +415,12 @@ tokenjar/
       screen_provider_h.cpp/h # Horizontal admin API screen
       screen_plan.cpp/h       # Vertical plan screen
       screen_plan_h.cpp/h     # Horizontal plan screen
+      screen_codex_plan.cpp/h # Codex plan screen
       screen_settings.cpp/h   # Vertical settings screen
       screen_settings_h.cpp/h # Horizontal settings screen
       i_screen_provider.h     # Provider screen interface
       i_screen_plan.h         # Plan screen interface
+      i_screen_codex_plan.h   # Codex plan screen interface
       i_screen_settings.h     # Settings screen interface
   platformio.ini              # Build configuration
   partitions.csv              # Flash partition table

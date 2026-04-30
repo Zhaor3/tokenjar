@@ -182,8 +182,13 @@ void ScreenProviderH::update(const UsageSnapshot& snap,
 
     bool monthly_view = (tf == Timeframe::D7 || tf == Timeframe::D30);
     float budget = monthly_view ? monthly_budget : daily_budget;
-    float spend  = monthly_view ? snap.spend_month : timeframeSpend(snap, tf);
-    uint64_t tok = monthly_view ? snap.tokens_month : snap.tokens_today;
+    float spend  = timeframeSpend(snap, tf);
+    uint64_t tok = snap.tokens_today;
+    if (tf == Timeframe::D30) {
+        tok = snap.tokens_month;
+    } else if (tf == Timeframe::D7) {
+        tok = (uint64_t)((double)snap.tokens_month * 7.0 / 30.0);
+    }
 
     // Hero number
     char hero[24];

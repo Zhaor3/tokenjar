@@ -14,9 +14,11 @@
 #include "storage/settings_store.h"
 #include "api/usage_provider.h"
 #include "api/claude_plan.h"
+#include "api/codex_plan.h"
 #include "api/claude_client.h"
 #include "api/claude_web_client.h"
 #include "api/openai_client.h"
+#include "api/openai_session_client.h"
 #include "input/encoder.h"
 #include "ui/ui_manager.h"
 
@@ -28,32 +30,39 @@ static Encoder          enc;
 static ClaudeUsageClient claudeApi;
 static OpenAIUsageClient openaiApi;
 static ClaudeWebClient   claudeWebApi;
+static OpenAISessionClient codexSessionApi;
 static UIManager        ui;
 
 // Shared data between main loop and API task
 static SemaphoreHandle_t dataMtx;
 static UsageSnapshot     claudeSnap, openaiSnap;
 static ClaudePlanSnapshot planSnap;
+static CodexPlanSnapshot codexSnap;
 static TaskHandle_t      apiTask = nullptr;
 static volatile bool     dataReady = false;
 static volatile bool     planReady = false;
+static volatile bool     codexReady = false;
 
 // Claude.ai endpoint has its own (slower) refresh cadence — 5 minutes.
 // The API task wakes every API_REFRESH_MS (60s) but only hits claude.ai
 // if enough time has elapsed since the last plan fetch.
 static constexpr uint32_t PLAN_REFRESH_MS = 5UL * 60UL * 1000UL;
 static uint32_t last_plan_fetch_ms = 0;
+static uint32_t last_codex_fetch_ms = 0;
 
 // Portal mode
 static WebServer*  portal_server = nullptr;
 static DNSServer*  portal_dns    = nullptr;
+static bool        portal_reboot_on_save = true;
+static bool        portal_ap_mode = true;
+static volatile bool portal_saved_pending = false;
 
 // Display buffer — sized for the larger dimension so it fits either orientation
 static uint8_t lvBuf[SCREEN_MAX_DIM * 20 * sizeof(lv_color_t)];
 
 // ── App state machine ────────────────────────────────────────────
 
-enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING, SETTINGS_MENU, RESET_CONFIRM };
+enum class State { SPLASH, ORIENTATION, PORTAL, CONNECTING, RUNNING, SETTINGS_MENU, MAIN_PAGE_MENU, CONFIG_PORTAL, RESET_CONFIRM };
 static State state = State::SPLASH;
 static uint32_t stateStart = 0;
 
@@ -85,17 +94,11 @@ static void apiRefreshLoop(void*) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(API_REFRESH_MS));
 
         // ── Admin API fetches (every wake-up, ~60s) ──────────────
-        // Seed each fetch with the last known snapshot so a transient
-        // failure on one of the subqueries (today's cost, month cost, etc.)
-        // preserves the previous values instead of wiping them to $0.
-        UsageSnapshot c, o;
+        UsageSnapshot c = {}, o = {};
         if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
             c = claudeSnap;
             o = openaiSnap;
             xSemaphoreGive(dataMtx);
-        } else {
-            memset(&c, 0, sizeof(c));
-            memset(&o, 0, sizeof(o));
         }
 
         String ck = store.claudeKey();
@@ -158,6 +161,71 @@ static void apiRefreshLoop(void*) {
                 xSemaphoreGive(dataMtx);
             }
         }
+
+        // ── Codex / ChatGPT subscription plan (rate-limited to 5 min) ──
+        String codexAccess = store.codexAccessToken();
+        String codexRefresh = store.codexRefreshToken();
+        String codexAccount = store.codexAccountId();
+        bool codexHasAuth = (codexAccess.length() > 0 || codexRefresh.length() > 0);
+        bool codex_first_fetch = (last_codex_fetch_ms == 0);
+        bool codex_interval_due = (now_ms - last_codex_fetch_ms) >= PLAN_REFRESH_MS;
+
+        if (codexHasAuth && (codex_first_fetch || codex_interval_due)) {
+            last_codex_fetch_ms = now_ms;
+
+            CodexPlanSnapshot p;
+            if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+                p = codexSnap;
+                xSemaphoreGive(dataMtx);
+            } else {
+                memset(&p, 0, sizeof(p));
+            }
+
+            bool fetched = false;
+            if (OpenAISessionClient::looksLikeAPIKey(codexAccess.c_str()) ||
+                OpenAISessionClient::looksLikeAPIKey(codexRefresh.c_str())) {
+                memset(&p, 0, sizeof(p));
+                p.error = CODEX_PLAN_WRONG_TOKEN;
+                p.last_updated = time(nullptr);
+            } else {
+                // If there is no access token yet, bootstrap one from refresh token.
+                if (codexAccess.length() == 0 && codexRefresh.length() > 0) {
+                    String newAccess, newRefresh;
+                    if (codexSessionApi.refreshAccessToken(codexRefresh.c_str(), newAccess, newRefresh)) {
+                        codexAccess = newAccess;
+                        store.setCodexAccessToken(newAccess);
+                        if (newRefresh.length() > 0 && newRefresh != codexRefresh) {
+                            store.setCodexRefreshToken(newRefresh);
+                            codexRefresh = newRefresh;
+                        }
+                    }
+                }
+
+                if (codexAccess.length() > 0) {
+                    fetched = codexSessionApi.fetch(codexAccess.c_str(), codexAccount.c_str(), p);
+                }
+
+                // Access tokens expire regularly. On auth failure, refresh once
+                // with the stored refresh token and retry immediately.
+                if (!fetched && p.error == CODEX_PLAN_AUTH_FAILED && codexRefresh.length() > 0) {
+                    String newAccess, newRefresh;
+                    if (codexSessionApi.refreshAccessToken(codexRefresh.c_str(), newAccess, newRefresh)) {
+                        store.setCodexAccessToken(newAccess);
+                        if (newRefresh.length() > 0 && newRefresh != codexRefresh) {
+                            store.setCodexRefreshToken(newRefresh);
+                        }
+                        fetched = codexSessionApi.fetch(newAccess.c_str(), codexAccount.c_str(), p);
+                    }
+                }
+            }
+
+            if (xSemaphoreTake(dataMtx, pdMS_TO_TICKS(500)) == pdTRUE) {
+                codexSnap = p;
+                if (p.valid) store.saveCodexCache(p);
+                codexReady = true;
+                xSemaphoreGive(dataMtx);
+            }
+        }
     }
 }
 
@@ -171,9 +239,11 @@ static const char PORTAL_HTML[] PROGMEM = R"rawliteral(
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#000;color:#f5f1ea;font-family:'JetBrains Mono',monospace;padding:24px}
 h1{font-size:14px;letter-spacing:4px;color:#d97757;margin-bottom:24px}
+p{font-size:11px;line-height:1.5;color:#6b6660;margin:-12px 0 20px}
 label{display:block;font-size:11px;letter-spacing:2px;color:#6b6660;margin:16px 0 4px}
-input,select{width:100%;padding:10px;background:#111;border:1px solid #1a1a1a;color:#f5f1ea;font-size:13px;font-family:inherit}
-input:focus{border-color:#d97757;outline:none}
+input,select,textarea{width:100%;padding:10px;background:#111;border:1px solid #1a1a1a;color:#f5f1ea;font-size:13px;font-family:inherit}
+textarea{min-height:84px;resize:vertical}
+input:focus,textarea:focus{border-color:#d97757;outline:none}
 button{width:100%;padding:12px;margin-top:20px;background:#d97757;color:#000;border:none;font-size:12px;letter-spacing:2px;cursor:pointer;font-family:inherit}
 button:active{opacity:.8}
 .row{display:flex;gap:12px}
@@ -188,6 +258,7 @@ hr{border:0;border-top:1px solid #1a1a1a;margin:20px 0}
 #networks div.sel{background:#1a1a1a;color:#d97757}
 </style></head><body>
 <h1>TOKENJAR</h1>
+<p>Leave saved secret fields blank to keep the current value.</p>
 <label>WIFI NETWORK</label>
 <input type="text" id="wssid" placeholder="Type your WiFi name here">
 <div id="networks" style="margin-top:8px">Scanning...</div>
@@ -210,15 +281,48 @@ hr{border:0;border-top:1px solid #1a1a1a;margin:20px 0}
   <div><label>MONTHLY BUDGET ($)</label><input type="number" id="obm" value="100" step="1"></div>
 </div>
 <hr>
+<p>OpenAI Session uses Codex/ChatGPT OAuth tokens, not sk-* Platform API keys. Paste ~/.codex/auth.json here or fill the token fields below.</p>
+<label>PASTE CODEX AUTH.JSON (recommended)</label>
+<textarea id="codex_json" placeholder='{"tokens":{"access_token":"...","refresh_token":"..."}}'></textarea>
+<label>OPENAI SESSION ACCESS TOKEN (not sk-* API key)</label>
+<input type="text" id="codex_access" placeholder="tokens.access_token">
+<label>OPENAI SESSION REFRESH TOKEN (recommended, not sk-* API key)</label>
+<input type="text" id="codex_refresh" placeholder="tokens.refresh_token">
+<label>CHATGPT ACCOUNT ID (optional)</label>
+<input type="text" id="codex_account" placeholder="tokens.account_id">
+<hr>
 <label>TIMEZONE (POSIX)</label>
 <input type="text" id="tz" value="EST5EDT,M3.2.0,M11.1.0">
 <label>OTA PASSWORD (optional)</label>
 <input type="password" id="ota">
 <button onclick="testApis()">TEST CONNECTIONS</button>
 <div id="tres" class="result"></div>
-<button onclick="saveConfig()">SAVE &amp; REBOOT</button>
+<button id="savebtn" onclick="saveConfig()">SAVE &amp; REBOOT</button>
 <div id="sres" class="result"></div>
 <script>
+function markConfigured(id,yes,label){
+  let el=document.getElementById(id);
+  if(yes) el.placeholder=(label||'Configured')+' - leave blank to keep';
+}
+function loadConfig(){
+  fetch('/config').then(r=>r.json()).then(j=>{
+    if(j.ssid) document.getElementById('wssid').value=j.ssid;
+    if(j.cbd!==undefined) document.getElementById('cbd').value=j.cbd;
+    if(j.cbm!==undefined) document.getElementById('cbm').value=j.cbm;
+    if(j.obd!==undefined) document.getElementById('obd').value=j.obd;
+    if(j.obm!==undefined) document.getElementById('obm').value=j.obm;
+    if(j.tz) document.getElementById('tz').value=j.tz;
+    if(j.codex_account) document.getElementById('codex_account').value=j.codex_account;
+    if(j.runtime) document.getElementById('savebtn').textContent='SAVE SETTINGS';
+    markConfigured('ckey',j.hasClaude,'Configured');
+    markConfigured('csid',j.hasClaudeSession,'Configured');
+    markConfigured('okey',j.hasOpenAI,'Configured');
+    markConfigured('codex_access',j.hasCodexAccess,'Configured');
+    markConfigured('codex_refresh',j.hasCodexRefresh,'Configured');
+    markConfigured('ota',j.hasOTA,'Configured');
+  }).catch(()=>{});
+}
+loadConfig();
 function doScan(tries){
   fetch('/scan').then(r=>r.json()).then(d=>{
     let el=document.getElementById('networks');
@@ -237,12 +341,17 @@ function testApis(){
   let r=document.getElementById('tres');r.textContent='Testing...';r.className='result';
   fetch('/test',{method:'POST',headers:{'Content-Type':'application/json'},
     body:JSON.stringify({ckey:document.getElementById('ckey').value,
-      okey:document.getElementById('okey').value})})
+      okey:document.getElementById('okey').value,
+      codex_json:document.getElementById('codex_json').value,
+      codex_access:document.getElementById('codex_access').value,
+      codex_refresh:document.getElementById('codex_refresh').value,
+      codex_account:document.getElementById('codex_account').value})})
   .then(x=>x.json()).then(j=>{
     let msg='';
     if(j.claude!==undefined) msg+='Claude: '+(j.claude?'OK':'FAIL')+' ';
     if(j.openai!==undefined) msg+='OpenAI: '+(j.openai?'OK':'FAIL');
-    r.textContent=msg;r.className='result '+(msg.includes('FAIL')?'fail':'ok');
+    if(j.codex!==undefined) msg+=(msg?' ':'')+'Codex: '+(j.codex?'OK':(j.codexError||'FAIL'));
+    r.textContent=msg;r.className='result '+((j.claude===false||j.openai===false||j.codex===false)?'fail':'ok');
   });
 }
 function saveConfig(){
@@ -252,13 +361,17 @@ function saveConfig(){
       ckey:document.getElementById('ckey').value,
       csid:document.getElementById('csid').value,
       okey:document.getElementById('okey').value,
+      codex_json:document.getElementById('codex_json').value,
+      codex_access:document.getElementById('codex_access').value,
+      codex_refresh:document.getElementById('codex_refresh').value,
+      codex_account:document.getElementById('codex_account').value,
       cbd:parseFloat(document.getElementById('cbd').value),
       cbm:parseFloat(document.getElementById('cbm').value),
       obd:parseFloat(document.getElementById('obd').value),
       obm:parseFloat(document.getElementById('obm').value),
       tz:document.getElementById('tz').value,
       ota:document.getElementById('ota').value})})
-  .then(x=>x.json()).then(j=>{r.textContent=j.ok?'Saved! Rebooting...':'Error';
+  .then(x=>x.json()).then(j=>{r.textContent=j.ok?(j.reboot?'Saved! Rebooting...':'Saved! Device updated.'):(j.error||'Error');
     r.className='result '+(j.ok?'ok':'fail');});
 }
 </script></body></html>
@@ -266,24 +379,168 @@ function saveConfig(){
 
 // ── Portal handlers ──────────────────────────────────────────────
 
-static void portalSetup() {
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_AP);
+static String jsonEscape(const String& in) {
+    String out;
+    out.reserve(in.length() + 8);
+    for (size_t i = 0; i < in.length(); ++i) {
+        char c = in[i];
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:   out += c; break;
+        }
+    }
+    return out;
+}
 
-    // Explicit AP config — ensure IP is 192.168.4.1
-    IPAddress local_ip(192, 168, 4, 1);
-    IPAddress gateway(192, 168, 4, 1);
-    IPAddress subnet(255, 255, 255, 0);
-    WiFi.softAPConfig(local_ip, gateway, subnet);
-    WiFi.softAP(AP_SSID);
-    WiFi.setSleep(false);    // prevent random client disconnects
-    delay(1000);             // give AP time to fully start
+static bool extractCodexAuthJson(const String& text,
+                                 String& access,
+                                 String& refresh,
+                                 String& account) {
+    int start = 0;
+    while (start < (int)text.length() &&
+           (text[start] == ' ' || text[start] == '\t' ||
+            text[start] == '\r' || text[start] == '\n')) {
+        start++;
+    }
+    if (start >= (int)text.length() || text[start] != '{') return false;
 
-    Serial.printf("[PORTAL] AP started: SSID=%s  IP=%s\n",
-        AP_SSID, WiFi.softAPIP().toString().c_str());
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, text);
+    if (err != DeserializationError::Ok) return false;
 
-    portal_dns = new DNSServer();
-    portal_dns->start(53, "*", WiFi.softAPIP());
+    const char* a = doc["tokens"]["access_token"] | (const char*)nullptr;
+    if (!a) a = doc["access_token"] | (const char*)nullptr;
+    const char* r = doc["tokens"]["refresh_token"] | (const char*)nullptr;
+    if (!r) r = doc["refresh_token"] | (const char*)nullptr;
+    const char* id = doc["tokens"]["account_id"] | (const char*)nullptr;
+    if (!id) id = doc["account_id"] | (const char*)nullptr;
+
+    bool found = false;
+    if (a && *a) { access = String(a); found = true; }
+    if (r && *r) { refresh = String(r); found = true; }
+    if (id && *id) { account = String(id); found = true; }
+    return found;
+}
+
+static const char* codexErrorName(uint8_t err) {
+    switch (err) {
+        case CODEX_PLAN_WRONG_TOKEN:   return "NOT API KEY";
+        case CODEX_PLAN_AUTH_FAILED:   return "AUTH EXPIRED";
+        case CODEX_PLAN_RATE_LIMITED:  return "RATE LIMITED";
+        case CODEX_PLAN_PARSE_ERROR:   return "API CHANGED";
+        case CODEX_PLAN_NETWORK_ERROR: return "OFFLINE";
+        default:                       return "FAIL";
+    }
+}
+
+static void applySerialConfigLine(String line) {
+    line.trim();
+    if (!line.startsWith("TJCFG ")) return;
+
+    String payload = line.substring(6);
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, payload);
+    if (err != DeserializationError::Ok) {
+        Serial.printf("[SERIAL_CFG] JSON error: %s\n", err.c_str());
+        Serial.println("TJCFG ERR JSON");
+        return;
+    }
+
+    String codexJson = doc["codex_json"] | "";
+    String codexAccess = doc["codex_access"] | "";
+    String codexRefresh = doc["codex_refresh"] | "";
+    String codexAccount = doc["codex_account"] | "";
+    extractCodexAuthJson(codexJson, codexAccess, codexRefresh, codexAccount);
+    extractCodexAuthJson(codexAccess, codexAccess, codexRefresh, codexAccount);
+    extractCodexAuthJson(codexRefresh, codexAccess, codexRefresh, codexAccount);
+
+    if (OpenAISessionClient::looksLikeAPIKey(codexAccess.c_str()) ||
+        OpenAISessionClient::looksLikeAPIKey(codexRefresh.c_str())) {
+        Serial.println("[SERIAL_CFG] Codex token field contains sk-* API key");
+        Serial.println("TJCFG ERR NOT_API_KEY");
+        return;
+    }
+
+    bool changed = false;
+    if (codexAccess.length() > 0) {
+        store.setCodexAccessToken(codexAccess);
+        changed = true;
+    }
+    if (codexRefresh.length() > 0) {
+        store.setCodexRefreshToken(codexRefresh);
+        changed = true;
+    }
+    if (codexAccount.length() > 0) {
+        store.setCodexAccountId(codexAccount);
+        changed = true;
+    }
+
+    if (!changed) {
+        Serial.println("TJCFG ERR EMPTY");
+        return;
+    }
+
+    memset(&codexSnap, 0, sizeof(codexSnap));
+    codexSnap.error = CODEX_PLAN_OK;
+    codexReady = true;
+    last_codex_fetch_ms = 0;
+    ui.refreshModes(store);
+    ui.updateData(claudeSnap, openaiSnap, store);
+    ui.updatePlan(planSnap);
+    ui.updateCodexPlan(codexSnap);
+    if (apiTask) xTaskNotifyGive(apiTask);
+    Serial.println("[SERIAL_CFG] Codex auth updated");
+    Serial.println("TJCFG OK");
+}
+
+static void handleSerialConfig() {
+    static String line;
+    while (Serial.available() > 0) {
+        char ch = (char)Serial.read();
+        if (ch == '\r') continue;
+        if (ch == '\n') {
+            applySerialConfigLine(line);
+            line = "";
+        } else if (line.length() < 12000) {
+            line += ch;
+        } else {
+            line = "";
+            Serial.println("TJCFG ERR TOO_LONG");
+        }
+    }
+}
+
+static void portalSetup(bool apMode = true, bool rebootOnSave = true) {
+    portal_ap_mode = apMode;
+    portal_reboot_on_save = rebootOnSave;
+    portal_saved_pending = false;
+
+    if (apMode) {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_AP);
+
+        // Explicit AP config — ensure IP is 192.168.4.1
+        IPAddress local_ip(192, 168, 4, 1);
+        IPAddress gateway(192, 168, 4, 1);
+        IPAddress subnet(255, 255, 255, 0);
+        WiFi.softAPConfig(local_ip, gateway, subnet);
+        WiFi.softAP(AP_SSID);
+        WiFi.setSleep(false);    // prevent random client disconnects
+        delay(1000);             // give AP time to fully start
+
+        Serial.printf("[PORTAL] AP started: SSID=%s  IP=%s\n",
+            AP_SSID, WiFi.softAPIP().toString().c_str());
+
+        portal_dns = new DNSServer();
+        portal_dns->start(53, "*", WiFi.softAPIP());
+    } else {
+        Serial.printf("[PORTAL] STA config portal started: http://%s/\n",
+            WiFi.localIP().toString().c_str());
+    }
 
     portal_server = new WebServer(80);
 
@@ -294,6 +551,26 @@ static void portalSetup() {
     portal_server->on("/ping", HTTP_GET, []() {
         Serial.println("[PORTAL] /ping hit!");
         portal_server->send(200, "text/plain", "TOKENJAR OK");
+    });
+
+    portal_server->on("/config", HTTP_GET, []() {
+        String json = "{";
+        json += "\"ssid\":\"" + jsonEscape(store.ssid()) + "\",";
+        json += "\"hasClaude\":" + String(store.hasClaude() ? "true" : "false") + ",";
+        json += "\"hasClaudeSession\":" + String(store.hasClaudeSession() ? "true" : "false") + ",";
+        json += "\"hasOpenAI\":" + String(store.hasOpenAI() ? "true" : "false") + ",";
+        json += "\"hasCodexAccess\":" + String(store.codexAccessToken().length() > 0 ? "true" : "false") + ",";
+        json += "\"hasCodexRefresh\":" + String(store.codexRefreshToken().length() > 0 ? "true" : "false") + ",";
+        json += "\"hasOTA\":" + String(store.hasOTAPass() ? "true" : "false") + ",";
+        json += "\"runtime\":" + String(portal_reboot_on_save ? "false" : "true") + ",";
+        json += "\"codex_account\":\"" + jsonEscape(store.codexAccountId()) + "\",";
+        json += "\"cbd\":" + String(store.claudeDaily(), 2) + ",";
+        json += "\"cbm\":" + String(store.claudeMonthly(), 2) + ",";
+        json += "\"obd\":" + String(store.openaiDaily(), 2) + ",";
+        json += "\"obm\":" + String(store.openaiMonthly(), 2) + ",";
+        json += "\"tz\":\"" + jsonEscape(store.timezone()) + "\"";
+        json += "}";
+        portal_server->send(200, "application/json", json);
     });
 
     // Start a background scan immediately
@@ -314,7 +591,7 @@ static void portalSetup() {
         String json = "[";
         for (int i = 0; i < n; i++) {
             if (i) json += ",";
-            json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+            json += "{\"ssid\":\"" + jsonEscape(WiFi.SSID(i)) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
         }
         json += "]";
         portal_server->send(200, "application/json", json);
@@ -329,6 +606,18 @@ static void portalSetup() {
         String json = "{";
         String ck = doc["ckey"] | "";
         String ok = doc["okey"] | "";
+        String codexJson = doc["codex_json"] | "";
+        String codexAccess = doc["codex_access"] | "";
+        String codexRefresh = doc["codex_refresh"] | "";
+        String codexAccount = doc["codex_account"] | "";
+        extractCodexAuthJson(codexJson, codexAccess, codexRefresh, codexAccount);
+        extractCodexAuthJson(codexAccess, codexAccess, codexRefresh, codexAccount);
+        extractCodexAuthJson(codexRefresh, codexAccess, codexRefresh, codexAccount);
+        if (ck.length() == 0) ck = store.claudeKey();
+        if (ok.length() == 0) ok = store.openaiKey();
+        if (codexAccess.length() == 0) codexAccess = store.codexAccessToken();
+        if (codexRefresh.length() == 0) codexRefresh = store.codexRefreshToken();
+        if (codexAccount.length() == 0) codexAccount = store.codexAccountId();
         bool first = true;
         if (ck.length() > 0) {
             UsageSnapshot s;
@@ -341,6 +630,41 @@ static void portalSetup() {
             bool r = openaiApi.fetch(ok.c_str(), s);
             if (!first) json += ",";
             json += "\"openai\":" + String(r ? "true" : "false");
+            first = false;
+        }
+        if (codexAccess.length() > 0 || codexRefresh.length() > 0) {
+            uint8_t codexErr = CODEX_PLAN_OK;
+            if (OpenAISessionClient::looksLikeAPIKey(codexAccess.c_str()) ||
+                OpenAISessionClient::looksLikeAPIKey(codexRefresh.c_str())) {
+                codexErr = CODEX_PLAN_WRONG_TOKEN;
+            } else if (codexAccess.length() == 0 && codexRefresh.length() > 0) {
+                String newAccess, newRefresh;
+                if (codexSessionApi.refreshAccessToken(codexRefresh.c_str(), newAccess, newRefresh)) {
+                    codexAccess = newAccess;
+                } else {
+                    codexErr = CODEX_PLAN_AUTH_FAILED;
+                }
+            }
+            CodexPlanSnapshot s = {};
+            bool r = codexErr == CODEX_PLAN_OK &&
+                     codexAccess.length() > 0 &&
+                     codexSessionApi.fetch(codexAccess.c_str(), codexAccount.c_str(), s);
+            if (!r && codexErr == CODEX_PLAN_OK && s.error == CODEX_PLAN_AUTH_FAILED && codexRefresh.length() > 0) {
+                String newAccess, newRefresh;
+                if (codexSessionApi.refreshAccessToken(codexRefresh.c_str(), newAccess, newRefresh)) {
+                    r = codexSessionApi.fetch(newAccess.c_str(), codexAccount.c_str(), s);
+                } else {
+                    codexErr = CODEX_PLAN_AUTH_FAILED;
+                }
+            }
+            if (!r && codexErr == CODEX_PLAN_OK) codexErr = s.error ? s.error : CODEX_PLAN_AUTH_FAILED;
+            if (!first) json += ",";
+            json += "\"codex\":" + String(r ? "true" : "false");
+            if (!r) {
+                json += ",\"codexError\":\"";
+                json += codexErrorName(codexErr);
+                json += "\"";
+            }
         }
         json += "}";
         portal_server->send(200, "application/json", json);
@@ -351,9 +675,31 @@ static void portalSetup() {
         JsonDocument doc;
         deserializeJson(doc, body);
 
+        String codexJson = doc["codex_json"] | "";
+        String codexAccess = doc["codex_access"] | "";
+        String codexRefresh = doc["codex_refresh"] | "";
+        String codexAccount = doc["codex_account"] | "";
+        extractCodexAuthJson(codexJson, codexAccess, codexRefresh, codexAccount);
+        extractCodexAuthJson(codexAccess, codexAccess, codexRefresh, codexAccount);
+        extractCodexAuthJson(codexRefresh, codexAccess, codexRefresh, codexAccount);
+
+        if (OpenAISessionClient::looksLikeAPIKey(codexAccess.c_str()) ||
+            OpenAISessionClient::looksLikeAPIKey(codexRefresh.c_str())) {
+            portal_server->send(200, "application/json",
+                "{\"ok\":false,\"error\":\"OpenAI Session needs ~/.codex/auth.json, not sk-* API key\"}");
+            return;
+        }
+
         String ssid = doc["ssid"] | "";
         String pass = doc["pass"] | "";
-        if (ssid.length() > 0) store.setWiFi(ssid, pass);
+        bool wifiChanged = false;
+        if (ssid.length() > 0) {
+            String oldSsid = store.ssid();
+            String oldPass = store.pass();
+            wifiChanged = (ssid != oldSsid) || (pass.length() > 0 && pass != oldPass);
+            String passToSave = (pass.length() == 0 && ssid == oldSsid) ? oldPass : pass;
+            store.setWiFi(ssid, passToSave);
+        }
 
         String ck = doc["ckey"] | "";
         if (ck.length() > 0) store.setClaudeKey(ck);
@@ -367,6 +713,12 @@ static void portalSetup() {
         String ok = doc["okey"] | "";
         if (ok.length() > 0) store.setOpenAIKey(ok);
 
+        if (codexAccess.length() > 0) store.setCodexAccessToken(codexAccess);
+
+        if (codexRefresh.length() > 0) store.setCodexRefreshToken(codexRefresh);
+
+        if (codexAccount.length() > 0) store.setCodexAccountId(codexAccount);
+
         store.setClaudeBudget(doc["cbd"] | DEFAULT_CLAUDE_DAILY_BUDGET,
                               doc["cbm"] | DEFAULT_CLAUDE_MONTHLY_BUDGET);
         store.setOpenAIBudget(doc["obd"] | DEFAULT_OPENAI_DAILY_BUDGET,
@@ -378,9 +730,16 @@ static void portalSetup() {
         String ota = doc["ota"] | "";
         if (ota.length() > 0) store.setOTAPass(ota);
 
-        portal_server->send(200, "application/json", "{\"ok\":true}");
-        delay(500);
-        ESP.restart();
+        bool shouldReboot = portal_reboot_on_save || wifiChanged;
+        portal_server->send(200, "application/json",
+            shouldReboot ? "{\"ok\":true,\"reboot\":true}" : "{\"ok\":true,\"reboot\":false}");
+
+        if (shouldReboot) {
+            delay(500);
+            ESP.restart();
+        } else {
+            portal_saved_pending = true;
+        }
     });
 
     // ── Captive-portal detection endpoints ─────────────────────────
@@ -421,6 +780,10 @@ static void portalSetup() {
 static void portalTeardown() {
     if (portal_server) { portal_server->stop(); delete portal_server; portal_server = nullptr; }
     if (portal_dns)    { portal_dns->stop();    delete portal_dns;    portal_dns = nullptr; }
+    if (portal_ap_mode && store.hasWiFi()) {
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(store.ssid().c_str(), store.pass().c_str());
+    }
 }
 
 // ── Setup ────────────────────────────────────────────────────────
@@ -581,17 +944,8 @@ void loop() {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
-            // Time sync — wait briefly for NTP to set the clock. Without a
-            // valid epoch the first API fetch queries 1970-01-01 and gets back
-            // an empty data array, which is cached as $0 / 0 tokens for today
-            // until the next refresh.
+            // Time sync
             configTzTime(store.timezone().c_str(), NTP_SERVER);
-            uint32_t tsyncStart = millis();
-            while (time(nullptr) < 1700000000 && millis() - tsyncStart < 5000) {
-                delay(100);
-            }
-            Serial.printf("NTP sync: epoch=%ld after %lums\n",
-                (long)time(nullptr), millis() - tsyncStart);
 
             // mDNS
             MDNS.begin(MDNS_HOST);
@@ -606,11 +960,14 @@ void loop() {
             store.loadCache("claude", claudeSnap);
             store.loadCache("openai", openaiSnap);
             store.loadPlanCache(planSnap);
+            store.loadCodexCache(codexSnap);
 
             // Init UI (builds mode ring from configured keys)
             ui.init(store, g_horizontal);
+            ui.setTimeframe(store.timeframe());
             ui.updateData(claudeSnap, openaiSnap, store);
             ui.updatePlan(planSnap);
+            ui.updateCodexPlan(codexSnap);
 
             // Start API refresh task on core 0
             dataMtx = xSemaphoreCreateMutex();
@@ -625,28 +982,34 @@ void loop() {
             store.loadCache("claude", claudeSnap);
             store.loadCache("openai", openaiSnap);
             store.loadPlanCache(planSnap);
+            store.loadCodexCache(codexSnap);
             ui.init(store, g_horizontal);
+            ui.setTimeframe(store.timeframe());
             ui.updateData(claudeSnap, openaiSnap, store);
             ui.updatePlan(planSnap);
+            ui.updateCodexPlan(codexSnap);
             state = State::RUNNING;
         }
         break;
 
     // ── RUNNING ──────────────────────────────────────────────────
     case State::RUNNING: {
+        handleSerialConfig();
+
         // Encoder: short press → next mode + refresh all data
         if (enc.wasPressed()) {
             ui.nextMode();
             last_plan_fetch_ms = 0;
+            last_codex_fetch_ms = 0;
             if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();
         }
-        // Encoder: long press → open interactive settings menu
+        // Encoder: long press opens the action menu.
         if (enc.wasLongPressed()) {
-            Serial.println("Long-press — opening settings menu");
             enc.rotation();    // discard any rotation accumulated during the long hold
             g_prevScreen = lv_screen_active();
-            lv_obj_t* menu = UIManager::makeSettingsMenu(store.defaultTimeframe());
+            Serial.println("Long-press — showing action menu");
+            lv_obj_t* menu = UIManager::makeSettingsMenu();
             lv_screen_load(menu);
             state = State::SETTINGS_MENU;
             break;
@@ -655,8 +1018,10 @@ void loop() {
         int rot = enc.rotation();
         if (rot != 0) {
             ui.adjustTimeframe(rot);
+            store.setTimeframe(ui.currentTimeframe());
             ui.updateData(claudeSnap, openaiSnap, store);
             last_plan_fetch_ms = 0;
+            last_codex_fetch_ms = 0;
             if (apiTask) xTaskNotifyGive(apiTask);
             ui.onActivity();
         }
@@ -679,6 +1044,15 @@ void loop() {
             }
         }
 
+        // Consume new Codex / ChatGPT plan data.
+        if (codexReady) {
+            if (xSemaphoreTake(dataMtx, 0) == pdTRUE) {
+                codexReady = false;
+                ui.updateCodexPlan(codexSnap);
+                xSemaphoreGive(dataMtx);
+            }
+        }
+
         // Periodic updates
         ui.tick();
         ui.updateBacklight();
@@ -693,44 +1067,102 @@ void loop() {
     // ── SETTINGS MENU ────────────────────────────────────────────
     case State::SETTINGS_MENU: {
         int rot = enc.rotation();
-        if (rot != 0) UIManager::settingsMenuRotate(rot);
-
+        if (rot != 0) {
+            UIManager::settingsMenuMove(rot);
+        }
         if (enc.wasPressed()) {
-            auto action = UIManager::settingsMenuClick();
-            switch (action) {
-                case UIManager::SettingsMenuAction::NONE:
-                    // Click entered edit mode on the timeframe row — keep
-                    // the menu up so rotation now cycles timeframes.
-                    ui.onActivity();
-                    break;
-                case UIManager::SettingsMenuAction::CHANGE_DEFAULT_TF: {
-                    Timeframe tf = UIManager::settingsMenuTimeframe();
-                    store.setDefaultTimeframe(tf);
-                    ui.setTimeframe(tf);
-                    ui.updateData(claudeSnap, openaiSnap, store);
-                    Serial.printf("Default timeframe set to %s\n",
-                        timeframeLabel(tf));
-                    ui.onActivity();
-                    break;
+            SettingsMenuSelection sel = UIManager::settingsMenuGetSel();
+            if (sel == SettingsMenuSelection::MAIN_PAGE) {
+                lv_obj_t* picker = UIManager::makeMainPageMenu(ui.currentTimeframe());
+                lv_screen_load(picker);
+                state = State::MAIN_PAGE_MENU;
+            } else if (sel == SettingsMenuSelection::API_PORTAL) {
+                bool useStaPortal = WiFi.status() == WL_CONNECTED;
+                if (useStaPortal) {
+                    portalSetup(false, false);
+                    String url = String("http://") + WiFi.localIP().toString();
+                    lv_obj_t* portal = UIManager::makeConfigPortal(url.c_str());
+                    lv_screen_load(portal);
+                    state = State::CONFIG_PORTAL;
+                    Serial.printf("Runtime API portal open at %s\n", url.c_str());
+                } else {
+                    portalSetup(true, true);
+                    lv_obj_t* qr = UIManager::makeQRSetup();
+                    lv_screen_load(qr);
+                    state = State::CONFIG_PORTAL;
+                    Serial.println("Runtime API portal open in AP mode");
                 }
-                case UIManager::SettingsMenuAction::FACTORY_RESET: {
-                    Serial.println("Settings → factory reset requested");
-                    lv_obj_t* confirm = UIManager::makeResetConfirm();
-                    lv_screen_load(confirm);
-                    state = State::RESET_CONFIRM;
-                    break;
-                }
-                case UIManager::SettingsMenuAction::BACK:
-                    if (g_prevScreen) lv_screen_load(g_prevScreen);
-                    ui.onActivity();
-                    state = State::RUNNING;
-                    break;
+            } else if (sel == SettingsMenuSelection::RESET) {
+                lv_obj_t* confirm = UIManager::makeResetConfirm();
+                lv_screen_load(confirm);
+                state = State::RESET_CONFIRM;
+            } else {
+                if (g_prevScreen) lv_screen_load(g_prevScreen);
+                ui.onActivity();
+                state = State::RUNNING;
             }
         }
-
-        // Long-press anywhere in the menu exits back to the previous screen.
         if (enc.wasLongPressed()) {
-            Serial.println("Settings menu dismissed (long-press)");
+            Serial.println("Settings menu cancelled");
+            if (g_prevScreen) lv_screen_load(g_prevScreen);
+            ui.onActivity();
+            state = State::RUNNING;
+        }
+        break;
+    }
+
+    // ── MAIN PAGE / TIMEFRAME PICKER ─────────────────────────────
+    case State::MAIN_PAGE_MENU: {
+        int rot = enc.rotation();
+        if (rot != 0) {
+            UIManager::mainPageMenuMove(rot);
+        }
+        if (enc.wasPressed()) {
+            Timeframe chosen = UIManager::mainPageMenuGetSel();
+            ui.setTimeframe(chosen);
+            store.setTimeframe(chosen);
+            ui.updateData(claudeSnap, openaiSnap, store);
+            last_plan_fetch_ms = 0;
+            last_codex_fetch_ms = 0;
+            if (apiTask) xTaskNotifyGive(apiTask);
+            if (g_prevScreen) lv_screen_load(g_prevScreen);
+            ui.onActivity();
+            state = State::RUNNING;
+            Serial.printf("Main page timeframe set to %s\n", timeframeLabel(chosen));
+        }
+        if (enc.wasLongPressed()) {
+            Serial.println("Main page picker cancelled");
+            if (g_prevScreen) lv_screen_load(g_prevScreen);
+            ui.onActivity();
+            state = State::RUNNING;
+        }
+        break;
+    }
+
+    // ── RUNTIME CONFIG PORTAL ────────────────────────────────────
+    case State::CONFIG_PORTAL: {
+        if (portal_dns) portal_dns->processNextRequest();
+        if (portal_server) portal_server->handleClient();
+
+        if (portal_saved_pending) {
+            portal_saved_pending = false;
+            portalTeardown();
+            last_plan_fetch_ms = 0;
+            last_codex_fetch_ms = 0;
+            ui.refreshModes(store);
+            ui.updateData(claudeSnap, openaiSnap, store);
+            ui.updatePlan(planSnap);
+            ui.updateCodexPlan(codexSnap);
+            if (apiTask) xTaskNotifyGive(apiTask);
+            ui.onActivity();
+            state = State::RUNNING;
+            Serial.println("Runtime settings saved — UI modes refreshed");
+            break;
+        }
+
+        if (enc.wasLongPressed()) {
+            Serial.println("Runtime API portal closed");
+            portalTeardown();
             if (g_prevScreen) lv_screen_load(g_prevScreen);
             ui.onActivity();
             state = State::RUNNING;

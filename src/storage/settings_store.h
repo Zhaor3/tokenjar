@@ -3,6 +3,7 @@
 #include <Preferences.h>
 #include "api/usage_provider.h"
 #include "api/claude_plan.h"
+#include "api/codex_plan.h"
 
 class SettingsStore {
     Preferences prefs_;
@@ -22,6 +23,16 @@ public:
     String   openaiKey();
     bool     hasClaude();
     bool     hasOpenAI();
+
+    // Codex / ChatGPT session OAuth tokens — used for Codex subscription
+    // rate-limit tracking via ChatGPT backend. Separate from OpenAI Admin API.
+    void     setCodexAccessToken(const String& k);
+    void     setCodexRefreshToken(const String& k);
+    void     setCodexAccountId(const String& id);
+    String   codexAccessToken();
+    String   codexRefreshToken();
+    String   codexAccountId();
+    bool     hasCodex();
 
     // Claude.ai session (sk-ant-sid01-...) — used to scrape subscription
     // plan usage (session %, weekly %, extra-usage $) from claude.ai's
@@ -48,6 +59,10 @@ public:
     void   setTimezone(const String& tz);
     String timezone();
 
+    // Main API usage timeframe
+    void      setTimeframe(Timeframe tf);
+    Timeframe timeframe();
+
     // OTA
     void   setOTAPass(const String& p);
     String otaPass();
@@ -71,6 +86,10 @@ public:
     // Cached Claude plan snapshot (separate key — different shape)
     void savePlanCache(const ClaudePlanSnapshot& s);
     bool loadPlanCache(ClaudePlanSnapshot& s);
+
+    // Cached Codex plan snapshot.
+    void saveCodexCache(const CodexPlanSnapshot& s);
+    bool loadCodexCache(CodexPlanSnapshot& s);
 
     // Factory reset
     void clear();
