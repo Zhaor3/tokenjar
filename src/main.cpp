@@ -43,6 +43,13 @@ static volatile bool     dataReady = false;
 static volatile bool     planReady = false;
 static volatile bool     codexReady = false;
 
+static bool        networkOnline = false;
+static bool        mdnsStarted   = false;
+static bool        otaStarted    = false;
+static uint32_t    last_wifi_retry_ms = 0;
+static wl_status_t last_wifi_status = WL_IDLE_STATUS;
+static constexpr uint32_t WIFI_RETRY_MS = 15000;
+
 // Claude.ai endpoint has its own (slower) refresh cadence — 5 minutes.
 // The API task wakes every API_REFRESH_MS (60s) but only hits claude.ai
 // if enough time has elapsed since the last plan fetch.
@@ -92,6 +99,11 @@ static uint32_t lvTick() { return millis(); }
 static void apiRefreshLoop(void*) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(API_REFRESH_MS));
+
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[API] WiFi offline - refresh skipped");
+            continue;
+        }
 
         // ── Admin API fetches (every wake-up, ~60s) ──────────────
         UsageSnapshot c = {}, o = {};
@@ -226,6 +238,112 @@ static void apiRefreshLoop(void*) {
                 xSemaphoreGive(dataMtx);
             }
         }
+    }
+}
+
+static const char* wifiStatusName(wl_status_t status) {
+    switch (status) {
+        case WL_IDLE_STATUS:     return "IDLE";
+        case WL_NO_SSID_AVAIL:   return "NO_SSID";
+        case WL_SCAN_COMPLETED:  return "SCAN_DONE";
+        case WL_CONNECTED:       return "CONNECTED";
+        case WL_CONNECT_FAILED:  return "CONNECT_FAILED";
+        case WL_CONNECTION_LOST: return "CONNECTION_LOST";
+        case WL_DISCONNECTED:    return "DISCONNECTED";
+        default:                 return "UNKNOWN";
+    }
+}
+
+static void configureStationWiFi() {
+    WiFi.mode(WIFI_STA);
+    WiFi.persistent(false);
+    WiFi.setSleep(false);
+    WiFi.setAutoReconnect(true);
+}
+
+static void wifiBeginStored(const char* reason) {
+    if (!store.hasWiFi()) return;
+    configureStationWiFi();
+    WiFi.disconnect(false, false);
+    delay(20);
+    Serial.printf("[WIFI] begin (%s): %s\n", reason, store.ssid().c_str());
+    WiFi.begin(store.ssid().c_str(), store.pass().c_str());
+    last_wifi_retry_ms = millis();
+    networkOnline = false;
+    last_wifi_status = WiFi.status();
+}
+
+static void startNetworkServices() {
+    configTzTime(store.timezone().c_str(), NTP_SERVER);
+
+    if (!mdnsStarted) {
+        mdnsStarted = MDNS.begin(MDNS_HOST);
+        Serial.printf("[WIFI] mDNS %s: http://%s.local/\n",
+                      mdnsStarted ? "ready" : "failed", MDNS_HOST);
+    }
+
+    if (!otaStarted) {
+        ArduinoOTA.setHostname(MDNS_HOST);
+        if (store.hasOTAPass())
+            ArduinoOTA.setPassword(store.otaPass().c_str());
+        ArduinoOTA.begin();
+        otaStarted = true;
+        Serial.println("[WIFI] OTA ready");
+    }
+}
+
+static void ensureApiTaskStarted() {
+    if (!dataMtx) {
+        dataMtx = xSemaphoreCreateMutex();
+        if (!dataMtx) {
+            Serial.println("[API] failed to create data mutex");
+            return;
+        }
+    }
+
+    if (!apiTask) {
+        BaseType_t ok = xTaskCreatePinnedToCore(apiRefreshLoop, "api", 8192,
+                                                nullptr, 1, &apiTask, 0);
+        if (ok != pdPASS) {
+            apiTask = nullptr;
+            Serial.println("[API] failed to start refresh task");
+            return;
+        }
+        Serial.println("[API] refresh task started");
+    }
+
+    xTaskNotifyGive(apiTask);
+}
+
+static void wifiWatchdog() {
+    if (!store.hasWiFi() || state == State::PORTAL || state == State::CONFIG_PORTAL)
+        return;
+
+    wl_status_t status = WiFi.status();
+    if (status != last_wifi_status) {
+        Serial.printf("[WIFI] status %s -> %s\n",
+                      wifiStatusName(last_wifi_status), wifiStatusName(status));
+        last_wifi_status = status;
+    }
+
+    if (status == WL_CONNECTED) {
+        if (!networkOnline) {
+            networkOnline = true;
+            Serial.printf("[WIFI] connected IP=%s RSSI=%d\n",
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            startNetworkServices();
+            last_plan_fetch_ms = 0;
+            last_codex_fetch_ms = 0;
+            if (apiTask) xTaskNotifyGive(apiTask);
+        }
+        return;
+    }
+
+    networkOnline = false;
+    uint32_t now = millis();
+    if (now - last_wifi_retry_ms >= WIFI_RETRY_MS) {
+        Serial.printf("[WIFI] reconnecting from %s\n", wifiStatusName(status));
+        wifiBeginStored("watchdog");
     }
 }
 
@@ -538,6 +656,8 @@ static void portalSetup(bool apMode = true, bool rebootOnSave = true) {
         portal_dns = new DNSServer();
         portal_dns->start(53, "*", WiFi.softAPIP());
     } else {
+        WiFi.setSleep(false);
+        WiFi.setAutoReconnect(true);
         Serial.printf("[PORTAL] STA config portal started: http://%s/\n",
             WiFi.localIP().toString().c_str());
     }
@@ -573,11 +693,19 @@ static void portalSetup(bool apMode = true, bool rebootOnSave = true) {
         portal_server->send(200, "application/json", json);
     });
 
-    // Start a background scan immediately
-    WiFi.scanNetworks(true);  // async=true
+    // Start background scans only in setup AP mode. Scanning while joined to
+    // the home network can briefly interrupt STA service on ESP32.
+    if (portal_ap_mode)
+        WiFi.scanNetworks(true);  // async=true
 
     portal_server->on("/scan", HTTP_GET, []() {
         Serial.println("[PORTAL] /scan hit");
+        if (!portal_ap_mode && WiFi.status() == WL_CONNECTED) {
+            String json = "[{\"ssid\":\"" + jsonEscape(store.ssid()) +
+                          "\",\"rssi\":" + String(WiFi.RSSI()) + "}]";
+            portal_server->send(200, "application/json", json);
+            return;
+        }
         int n = WiFi.scanComplete();
         if (n == WIFI_SCAN_RUNNING) {
             portal_server->send(200, "application/json", "[]");
@@ -781,8 +909,7 @@ static void portalTeardown() {
     if (portal_server) { portal_server->stop(); delete portal_server; portal_server = nullptr; }
     if (portal_dns)    { portal_dns->stop();    delete portal_dns;    portal_dns = nullptr; }
     if (portal_ap_mode && store.hasWiFi()) {
-        WiFi.mode(WIFI_STA);
-        WiFi.begin(store.ssid().c_str(), store.pass().c_str());
+        wifiBeginStored("portal close");
     }
 }
 
@@ -868,8 +995,7 @@ void loop() {
                 state = State::PORTAL;
                 Serial.println("No WiFi configured — portal mode");
             } else {
-                WiFi.mode(WIFI_STA);
-                WiFi.begin(store.ssid().c_str(), store.pass().c_str());
+                wifiBeginStored("boot");
                 lv_obj_t* conn = UIManager::makeConnecting(store.ssid().c_str());
                 lv_screen_load(conn);
                 state = State::CONNECTING;
@@ -912,8 +1038,7 @@ void loop() {
                 state = State::PORTAL;
                 Serial.println("No WiFi configured — portal mode");
             } else {
-                WiFi.mode(WIFI_STA);
-                WiFi.begin(store.ssid().c_str(), store.pass().c_str());
+                wifiBeginStored("boot");
                 lv_obj_t* conn = UIManager::makeConnecting(store.ssid().c_str());
                 lv_screen_load(conn);
                 state = State::CONNECTING;
@@ -943,18 +1068,9 @@ void loop() {
     case State::CONNECTING:
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-
-            // Time sync
-            configTzTime(store.timezone().c_str(), NTP_SERVER);
-
-            // mDNS
-            MDNS.begin(MDNS_HOST);
-
-            // OTA
-            ArduinoOTA.setHostname(MDNS_HOST);
-            if (store.hasOTAPass())
-                ArduinoOTA.setPassword(store.otaPass().c_str());
-            ArduinoOTA.begin();
+            networkOnline = true;
+            last_wifi_status = WL_CONNECTED;
+            startNetworkServices();
 
             // Load cached snapshots
             store.loadCache("claude", claudeSnap);
@@ -969,11 +1085,7 @@ void loop() {
             ui.updatePlan(planSnap);
             ui.updateCodexPlan(codexSnap);
 
-            // Start API refresh task on core 0
-            dataMtx = xSemaphoreCreateMutex();
-            xTaskCreatePinnedToCore(apiRefreshLoop, "api", 8192,
-                                    nullptr, 1, &apiTask, 0);
-            xTaskNotifyGive(apiTask);   // trigger first fetch
+            ensureApiTaskStarted();
 
             state = State::RUNNING;
             Serial.println("Running — UI active");
@@ -988,6 +1100,8 @@ void loop() {
             ui.updateData(claudeSnap, openaiSnap, store);
             ui.updatePlan(planSnap);
             ui.updateCodexPlan(codexSnap);
+            ensureApiTaskStarted();
+            Serial.println("[WIFI] background reconnect will continue");
             state = State::RUNNING;
         }
         break;
@@ -995,6 +1109,7 @@ void loop() {
     // ── RUNNING ──────────────────────────────────────────────────
     case State::RUNNING: {
         handleSerialConfig();
+        wifiWatchdog();
 
         // Encoder: short press → next mode + refresh all data
         if (enc.wasPressed()) {
